@@ -319,7 +319,7 @@ def create_app(trunk, split, conns, headers):
                     'Content-Length': str(length),
                     'Accept-Ranges': 'bytes',
                 },
-                status_code=200,
+                status_code=206,
             )
 
         match = re.compile(r'bytes=(\d+)-(\d*)').match(range_str)
