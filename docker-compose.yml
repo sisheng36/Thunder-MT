@@ -14,7 +14,7 @@ services:
       - HEADERS={}       # 请求直链时附加的 HTTP 头，JSON 格式
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/stream?url=http://127.0.0.1:1')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')"]
       interval: 30s
       timeout: 5s
       retries: 3

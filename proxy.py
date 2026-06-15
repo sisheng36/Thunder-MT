@@ -259,6 +259,10 @@ def resolve_direct_url(backend_url, headers=None, timeout=15):
 def create_app(trunk, split, conns, headers):
     app = FastAPI()
 
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
     @app.get("/stream")
     def stream(request: Request):
         backend_url = request.query_params.get('url')
