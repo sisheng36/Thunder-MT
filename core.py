@@ -159,12 +159,16 @@ class URLProxy:
     def stream(self, begin=None, end=None, split=None):
         if begin is None:
             begin = 0
-        if end is None:
+        if end is not None:
             self._info_ready.wait()
-            end = self._content_length - 1
+        else:
+            self._info_ready.wait()
+            end = self._content_length
+        if end > self._content_length:
+            end = self._content_length
         if split is None:
             split = self.split
-        spliter = Spliter(begin=begin, end=end)
+        spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
         executor = ThreadPoolExecutor(max_workers=self.conns)
 
         for future in as_completed(
@@ -178,14 +182,18 @@ class URLProxy:
     def sorted_stream(self, begin=None, end=None, trunk=None, split=None):
         if begin is None:
             begin = 0
-        if end is None:
+        if end is not None:
             self._info_ready.wait()
-            end = self._content_length - 1
+        else:
+            self._info_ready.wait()
+            end = self._content_length
         if trunk is None:
             trunk = self.trunk
         if split is None:
             split = self.split
-        spliter = Spliter(begin=begin, end=end)
+        if end > self._content_length:
+            end = self._content_length
+        spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
         for l, r in spliter.iter(split=trunk):
             buf = BytesIO()
             for data, b, e in self.stream(begin=l, end=r, split=split):
@@ -238,36 +246,29 @@ def stream_handler(url: str, request: Request):
         sessions_last_access[direct_url] = time.time()
         proxy = sessions[direct_url]
 
-    # Wait for content length (first chunk must arrive)
-    proxy._info_ready.wait()
-    size = proxy.content_length
-
     range_str = request.headers.get("Range")
     begin = 0
-    end = size - 1
-
+    end = None
     if range_str:
         match = re.compile(r'bytes=(\d+)-(\d*)').match(range_str)
         if match:
             b_str, e_str = match.groups()
             begin = int(b_str) if b_str else 0
-            end = int(e_str) if e_str else size - 1
+            if e_str:
+                end = int(e_str) + 1
 
-    end_out = min(begin + trunk, size) - 1
-    if end_out < end:
-        end = end_out
+    def _generate():
+        for chunk in proxy.sorted_stream(begin=begin, end=end):
+            yield chunk
 
-    headers = {
-        "Content-Type": proxy.content_type,
-        "Content-Range": f"bytes {begin}-{end}/{size}",
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(end - begin + 1),
-    }
-
+    ct = mime_by_ext(direct_url, "application/octet-stream")
     return StreamingResponse(
-        proxy.sorted_stream(begin=begin, end=end),
-        status_code=206 if range_str else 200,
-        headers=headers,
+        _generate(),
+        status_code=200,
+        headers={
+            "Content-Type": ct,
+            "Accept-Ranges": "bytes",
+        },
     )
 
 
