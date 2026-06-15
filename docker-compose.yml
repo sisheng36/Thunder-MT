@@ -4,8 +4,28 @@ services:
     container_name: thunder-mt
     restart: unless-stopped
     network_mode: host
-    command:
-      - --listen=:8010
-      - --piece=1M
-      - --buffer=50M
-      - --workers=10
+    environment:
+      - LISTEN=:8010
+      - PIECE=1M
+      - BUFFER=50M
+      - WORKERS=10
+      - TIMEOUT=30s
+      - SESSION_TTL=120s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ──────────────────────────────────────────────
+# SmartStrm STRM 内容替换插件配置:
+#
+#   查找: http://127.0.0.1:8024/smartstrm_fid/迅雷/
+#   替换: http://127.0.0.1:8010/stream?url=http://127.0.0.1:8024/smartstrm_fid/迅雷/
+# ──────────────────────────────────────────────

@@ -97,22 +97,65 @@ func formatSize(n int64) string {
 	}
 }
 
+func envStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envSize(key, def string) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		v = def
+	}
+	n, err := parseSize(v)
+	if err != nil {
+		log.Fatalf("env %s: %v", key, err)
+	}
+	return n
+}
+
+func envDuration(key, def string) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		v = def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Fatalf("env %s: %v", key, err)
+	}
+	return d
+}
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Fatalf("env %s: %v", key, err)
+	}
+	return n
+}
+
 func main() {
 	cfg := Config{
-		Listen:  ":8010",
-		Piece:   1 << 20,
-		Buffer:  50 << 20,
-		Workers: 10,
-		Timeout: 30 * time.Second,
-		TTL:     120 * time.Second,
+		Listen:  envStr("LISTEN", ":8010"),
+		Piece:   envSize("PIECE", "1M"),
+		Buffer:  envSize("BUFFER", "50M"),
+		Workers: envInt("WORKERS", 10),
+		Timeout: envDuration("TIMEOUT", "30s"),
+		TTL:     envDuration("SESSION_TTL", "120s"),
 	}
 
-	flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address")
-	flag.Func("piece", "piece size (default 1M)", func(s string) error { n, e := parseSize(s); cfg.Piece = n; return e })
-	flag.Func("buffer", "max buffer per session (default 50M)", func(s string) error { n, e := parseSize(s); cfg.Buffer = n; return e })
-	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "max concurrent downloads")
-	flag.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-piece download timeout")
-	flag.DurationVar(&cfg.TTL, "session-ttl", cfg.TTL, "idle session cleanup TTL")
+	flag.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address [$LISTEN]")
+	flag.Func("piece", "piece size (default 1M) [$PIECE]", func(s string) error { n, e := parseSize(s); cfg.Piece = n; return e })
+	flag.Func("buffer", "max buffer per session (default 50M) [$BUFFER]", func(s string) error { n, e := parseSize(s); cfg.Buffer = n; return e })
+	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "max concurrent downloads [$WORKERS]")
+	flag.DurationVar(&cfg.Timeout, "timeout", cfg.Timeout, "per-piece download timeout [$TIMEOUT]")
+	flag.DurationVar(&cfg.TTL, "session-ttl", cfg.TTL, "idle session cleanup TTL [$SESSION_TTL]")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "thunder-mt - multi-threaded stream engine for SmartStrm\n\nFlags:\n")
@@ -571,14 +614,24 @@ func (ss *session) serveHTTP(w http.ResponseWriter, r *http.Request) error {
 func (ss *session) streamData(w http.ResponseWriter, r *http.Request, start, end int64) error {
 	offset := start
 
-	for offset < end {
-		if r.Context().Err() != nil {
-			return r.Context().Err()
+	poke := make(chan struct{})
+	defer close(poke)
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-poke:
+				return
+			case <-ticker.C:
+				ss.mu.Lock()
+				ss.cond.Broadcast()
+				ss.mu.Unlock()
+			}
 		}
-		if ss.ctx.Err() != nil {
-			return ss.ctx.Err()
-		}
+	}()
 
+	for offset < end {
 		ps := ss.pieceSize
 		chunkOff := alignDown(offset, ps)
 
@@ -588,6 +641,11 @@ func (ss *session) streamData(w http.ResponseWriter, r *http.Request, start, end
 			err := ss.err
 			ss.mu.Unlock()
 			return err
+		}
+
+		if ss.ctx.Err() != nil {
+			ss.mu.Unlock()
+			return ss.ctx.Err()
 		}
 
 		idx := chunkIndex(ss.chunks, chunkOff)
@@ -626,6 +684,10 @@ func (ss *session) streamData(w http.ResponseWriter, r *http.Request, start, end
 		}
 		ss.cond.Wait()
 		ss.mu.Unlock()
+
+		if r.Context().Err() != nil {
+			return r.Context().Err()
+		}
 	}
 
 	ss.mu.Lock()
