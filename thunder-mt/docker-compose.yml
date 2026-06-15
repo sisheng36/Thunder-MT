@@ -1,0 +1,11 @@
+services:
+  thunder-mt:
+    image: ghcr.io/sisheng36/thunder-mt:latest
+    container_name: thunder-mt
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --listen=:8010
+      - --piece=1M
+      - --buffer=50M
+      - --workers=10
