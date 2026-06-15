@@ -101,6 +101,12 @@ func mimeByExt(rawURL, contentType string) string {
 		return contentType
 	}
 	ext := strings.ToLower(path.Ext(u.Path))
+	if ext == "" {
+		fe := strings.ToLower(u.Query().Get("fext"))
+		if fe != "" {
+			ext = "." + fe
+		}
+	}
 	if mt, ok := extMIME[ext]; ok {
 		return mt
 	}
