@@ -2,6 +2,8 @@ name: Docker Build and Push
 
 on:
   push:
+    tags:
+      - "v*"
     branches: [main, New-functions]
     paths:
       - 'thunder-mt/**'
