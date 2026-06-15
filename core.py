@@ -106,6 +106,9 @@ class Spliter:
         if begin is not None and end is not None:
             self.begin = begin
             self.length = end - begin + 1
+        elif begin is not None and length:
+            self.begin = begin
+            self.length = length
         elif length:
             self.begin = 0
             self.length = length
@@ -159,16 +162,12 @@ class URLProxy:
     def stream(self, begin=None, end=None, split=None):
         if begin is None:
             begin = 0
-        if end is not None:
-            self._info_ready.wait()
-        else:
-            self._info_ready.wait()
-            end = self._content_length
-        if end > self._content_length:
-            end = self._content_length
         if split is None:
             split = self.split
-        spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
+        if end is not None:
+            spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
+        else:
+            spliter = Spliter(begin=begin, length=split)
         executor = ThreadPoolExecutor(max_workers=self.conns)
 
         for future in as_completed(
@@ -182,24 +181,22 @@ class URLProxy:
     def sorted_stream(self, begin=None, end=None, trunk=None, split=None):
         if begin is None:
             begin = 0
-        if end is not None:
-            self._info_ready.wait()
-        else:
-            self._info_ready.wait()
-            end = self._content_length
         if trunk is None:
             trunk = self.trunk
         if split is None:
             split = self.split
-        if end > self._content_length:
-            end = self._content_length
-        spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
+        if end is not None:
+            spliter = Spliter(begin=begin, end=end - 1 if end > 0 else 0)
+        else:
+            spliter = Spliter(begin=begin, length=trunk)
         for l, r in spliter.iter(split=trunk):
             buf = BytesIO()
             for data, b, e in self.stream(begin=l, end=r, split=split):
                 buf.seek(b - l)
                 buf.write(data)
             yield buf.getvalue()
+            if end is not None and r >= end - 1:
+                break
 
 
 SS_CACHE: dict[str, tuple[str, float]] = {}
