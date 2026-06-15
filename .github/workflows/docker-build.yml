@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - "v*"
-    branches: [main, Thunder-MT]
-    paths:
-      - '**'
   workflow_dispatch:
 
 env:
