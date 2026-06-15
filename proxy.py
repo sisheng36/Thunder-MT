@@ -201,6 +201,13 @@ class URLProxy:
             content, b, e = future.result()
             yield content, b, e
 
+    def continuous_stream(self, begin=0):
+        next_begin = begin
+        while next_begin < self.length:
+            end = min(next_begin + self.trunk, self.length) - 1
+            yield from self.sorted_stream(begin=next_begin, end=end)
+            next_begin = end + 1
+
     def sorted_stream(self, *, begin=None, end=None, trunk=None, split=None):
         if not begin:
             begin = 0
@@ -308,18 +315,15 @@ def create_app(trunk, split, conns, headers):
 
         range_str = request.headers.get("Range")
         if not range_str:
-            end = min(proxy.trunk, size) - 1
-            length = end + 1
-            logging.info(f"无 Range: begin=0 end={end} length={length} trunk={proxy.trunk} size={size}")
+            logging.info(f"无 Range: 连续流 0→{size}, trunk={proxy.trunk}")
             return StreamingResponse(
-                proxy.sorted_stream(begin=0, end=end),
+                proxy.continuous_stream(begin=0),
                 headers={
                     'Content-Type': proxy.content_type,
-                    'Content-Range': f'bytes 0-{end}/{size}',
-                    'Content-Length': str(length),
+                    'Content-Length': str(size),
                     'Accept-Ranges': 'bytes',
                 },
-                status_code=206,
+                status_code=200,
             )
 
         match = re.compile(r'bytes=(\d+)-(\d*)').match(range_str)
@@ -327,23 +331,36 @@ def create_app(trunk, split, conns, headers):
         begin = int(begin) if begin else 0
         if end:
             end = min(int(end), begin + proxy.trunk, size - 1)
+            length = end - begin + 1
+            logging.info(f"Range(B): {range_str} → begin={begin} end={end} length={length}")
+            try:
+                return StreamingResponse(
+                    proxy.sorted_stream(begin=begin, end=end),
+                    headers={
+                        'Content-Range': f'bytes {begin}-{end}/{size}',
+                        'Content-Type': proxy.content_type,
+                        'Content-Length': str(length),
+                        'Accept-Ranges': 'bytes',
+                    },
+                    status_code=206,
+                )
+            except Exception:
+                raise HTTPException(status_code=404)
         else:
-            end = min(begin + proxy.trunk, size) - 1
-        length = end - begin + 1
-        logging.info(f"Range: {range_str} → begin={begin} end={end} length={length} trunk={proxy.trunk} size={size}")
-        try:
-            return StreamingResponse(
-                proxy.sorted_stream(begin=begin, end=end),
-                headers={
-                    'Content-Range': f'bytes {begin}-{end}/{size}',
-                    'Content-Type': proxy.content_type,
-                    'Content-Length': str(length),
-                    'Accept-Ranges': 'bytes',
-                },
-                status_code=206,
-            )
-        except Exception:
-            raise HTTPException(status_code=404)
+            logging.info(f"Range(U): {range_str} 连续流 {begin}→{size}")
+            try:
+                return StreamingResponse(
+                    proxy.continuous_stream(begin=begin),
+                    headers={
+                        'Content-Range': f'bytes {begin}-{size - 1}/{size}',
+                        'Content-Type': proxy.content_type,
+                        'Content-Length': str(size - begin),
+                        'Accept-Ranges': 'bytes',
+                    },
+                    status_code=206,
+                )
+            except Exception:
+                raise HTTPException(status_code=404)
 
     return app
 
