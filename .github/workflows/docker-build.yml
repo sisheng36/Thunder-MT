@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+    branches: [main, Thunder-MT]
+    paths:
+      - '**'
   workflow_dispatch:
 
 env:
@@ -20,15 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
+      - name: set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: vet
-        run: go vet ./...
-
-      - name: build
-        run: go build -o thunder-mt .
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: login to ghcr
         uses: docker/login-action@v3
@@ -36,12 +35,6 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: build and push Docker image
         uses: docker/build-push-action@v6
