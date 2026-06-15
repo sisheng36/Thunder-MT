@@ -1,32 +1,13 @@
 services:
-  thunder-mt:
-    image: ghcr.io/sisheng36/thunder-mt:latest
-    container_name: thunder-mt
-    restart: unless-stopped
-    network_mode: host
+  proxy:
+    build: .
+    ports:
+      - "8010:8010"
     environment:
-      - LISTEN_HOST=0.0.0.0
-      - LISTEN_PORT=8010
-      - TRUNK=32M
-      - SPLIT=3M
-      - CONNS=4
-      - TIMEOUT=30
-      - SESSION_TTL=120
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8010/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-# ──────────────────────────────────────────────
-# SmartStrm STRM 内容替换插件配置:
-#
-#   查找: http://127.0.0.1:8024/smartstrm_fid/迅雷/
-#   替换: http://127.0.0.1:8010/stream?url=http://127.0.0.1:8024/smartstrm_fid/迅雷/
-# ──────────────────────────────────────────────
+      - TRUNK=120M
+      - SPLIT=1M
+      - CONNS=3
+      - HOST=0.0.0.0
+      - PORT=8010
+      - HEADERS={}
+    restart: unless-stopped

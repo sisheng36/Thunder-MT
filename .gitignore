@@ -1,3 +1,2 @@
-.DS_Store
-thunder-mt
-*.exe
+__pycache__/
+*.pyc

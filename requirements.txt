@@ -1,4 +1,5 @@
 httpx
 fastapi
-uvicorn[standard]
 humanfriendly
+tqdm
+uvicorn
