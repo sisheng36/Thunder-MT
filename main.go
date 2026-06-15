@@ -421,24 +421,6 @@ func (s *Server) getOrCreateSession(directURL string) *session {
 }
 
 func (s *Server) initSession(ss *session) {
-	if err := ss.fetchFileInfo(); err != nil {
-		ss.mu.Lock()
-		ss.err = err
-		ss.infoReady = true
-		ss.mu.Unlock()
-		ss.cond.Broadcast()
-		log.Printf("fetch info failed %q: %v", ss.url, err)
-		return
-	}
-
-	ss.mu.Lock()
-	ss.infoReady = true
-	ss.mu.Unlock()
-	ss.cond.Broadcast()
-
-	log.Printf("session start: size=%s type=%q url=%s",
-		formatSize(ss.contentLength), ss.contentType, truncate(ss.url, 80))
-
 	s.launchWorkers(ss)
 }
 
@@ -453,43 +435,6 @@ func (s *Server) launchWorkers(ss *session) {
 	for i := 0; i < n; i++ {
 		go ss.downloadLoop()
 	}
-}
-
-func (ss *session) fetchFileInfo() error {
-	client := &http.Client{Timeout: ss.srv.cfg.Timeout}
-	req, err := http.NewRequestWithContext(ss.ctx, "GET", ss.url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Range", "bytes=0-0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	ct := mimeByExt(ss.url, resp.Header.Get("Content-Type"))
-	size := resp.ContentLength
-
-	if cr := resp.Header.Get("Content-Range"); cr != "" {
-		parts := strings.Split(cr, "/")
-		if len(parts) == 2 {
-			if n, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil && n > 0 {
-				size = n
-			}
-		}
-	}
-
-	if size <= 0 {
-		return fmt.Errorf("cannot determine file size (status %d)", resp.StatusCode)
-	}
-
-	ss.mu.Lock()
-	ss.contentLength = size
-	ss.contentType = ct
-	ss.mu.Unlock()
-	return nil
 }
 
 func (ss *session) downloadLoop() {
@@ -519,19 +464,31 @@ func (ss *session) downloadLoop() {
 		}
 
 		ss.srv.sem <- struct{}{}
-		data, err := downloadPiece(ss.ctx, ss.url, off, end-1, ss.srv.cfg)
+		data, totalSize, ct, err := downloadPiece(ss.ctx, ss.url, off, end-1, ss.srv.cfg)
 		<-ss.srv.sem
 
 		ss.mu.Lock()
+
 		if err != nil {
 			if !strings.Contains(err.Error(), "context canceled") {
 				ss.err = fmt.Errorf("chunk %d: %w", off, err)
 				log.Printf("download chunk %d failed: %v", off, err)
 			}
 			delete(ss.downloading, off)
+			if !ss.infoReady {
+				ss.infoReady = true
+			}
 			ss.mu.Unlock()
 			ss.cond.Broadcast()
 			return
+		}
+
+		if !ss.infoReady && totalSize > 0 {
+			ss.contentLength = totalSize
+			ss.contentType = mimeByExt(ss.url, ct)
+			ss.infoReady = true
+			log.Printf("session start: size=%s type=%q url=%s",
+				formatSize(ss.contentLength), ss.contentType, truncate(ss.url, 80))
 		}
 
 		delete(ss.downloading, off)
@@ -546,7 +503,16 @@ func (ss *session) nextPiece() (int64, bool) {
 	defer ss.mu.Unlock()
 
 	size := ss.contentLength
-	if size <= 0 || ss.playHead >= size {
+	if size <= 0 {
+		off := int64(0)
+		if !ss.downloading[off] && chunkIndex(ss.chunks, off) < 0 {
+			ss.downloading[off] = true
+			return off, true
+		}
+		return 0, false
+	}
+
+	if ss.playHead >= size {
 		return 0, false
 	}
 
@@ -599,25 +565,38 @@ func chunkIndex(chunks []piece, offset int64) int {
 	return -1
 }
 
-func downloadPiece(ctx context.Context, url string, start, end int64, cfg Config) ([]byte, error) {
+func downloadPiece(ctx context.Context, url string, start, end int64, cfg Config) (data []byte, totalSize int64, contentType string, err error) {
 	client := &http.Client{Timeout: cfg.Timeout}
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, 0, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	return io.ReadAll(resp.Body)
+
+	ct := resp.Header.Get("Content-Type")
+	total := resp.ContentLength
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		parts := strings.Split(cr, "/")
+		if len(parts) == 2 {
+			if n, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil && n > 0 {
+				total = n
+			}
+		}
+	}
+
+	data, err = io.ReadAll(resp.Body)
+	return data, total, ct, err
 }
 
 func (ss *session) serveHTTP(w http.ResponseWriter, r *http.Request) error {
