@@ -7,7 +7,7 @@ services:
       - "8010:8010"
     environment:
       - TRUNK=120M       # 单次 Range 返回量 / 缓冲窗口
-      - SPLIT=1M         # 并行下载分块大小
+      - SPLIT=3M         # 并行下载分块大小
       - CONNS=3          # 并行线程数
       - HOST=0.0.0.0
       - PORT=8010
