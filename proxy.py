@@ -1,3 +1,4 @@
+import time
 import concurrent
 import re
 from abc import abstractmethod
@@ -245,6 +246,23 @@ class URLProxy:
         print('下载完成')
 
 _proxy_cache = {}
+_CACHE_TTL = 3600
+
+
+def _get_cached(backend_url):
+    entry = _proxy_cache.get(backend_url)
+    if entry is None:
+        return None
+    last_access, proxy = entry
+    if time.time() - last_access > _CACHE_TTL:
+        try:
+            proxy.source.session.close()
+        except Exception:
+            pass
+        del _proxy_cache[backend_url]
+        return None
+    _proxy_cache[backend_url] = (time.time(), proxy)
+    return proxy
 
 
 def resolve_direct_url(backend_url, headers=None, timeout=15):
@@ -269,17 +287,17 @@ def create_app(trunk, split, conns, headers):
         if not backend_url:
             raise HTTPException(status_code=400, detail="Missing 'url' parameter")
 
-        if backend_url not in _proxy_cache:
+        proxy = _get_cached(backend_url)
+        if proxy is None:
             try:
                 direct_url = resolve_direct_url(backend_url, headers)
             except Exception as e:
                 logging.error(f"解析直链失败: {e}")
                 raise HTTPException(status_code=502, detail="无法解析后端地址")
-            _proxy_cache[backend_url] = URLProxy(
+            proxy = URLProxy(
                 urls=direct_url, trunk=trunk, split=split, conns=conns, headers=headers
             )
-
-        proxy = _proxy_cache[backend_url]
+            _proxy_cache[backend_url] = (time.time(), proxy)
         size = proxy.length
 
         range_str = request.headers.get("Range")
