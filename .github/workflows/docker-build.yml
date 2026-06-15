@@ -4,9 +4,9 @@ on:
   push:
     tags:
       - "v*"
-    branches: [main, New-functions]
+    branches: [main, Thunder-MT]
     paths:
-      - 'thunder-mt/**'
+      - '**'
   workflow_dispatch:
 
 env:
@@ -28,11 +28,9 @@ jobs:
           go-version: "1.23"
 
       - name: vet
-        working-directory: thunder-mt
         run: go vet ./...
 
       - name: build
-        working-directory: thunder-mt
         run: go build -o thunder-mt .
 
       - name: login to ghcr
@@ -51,7 +49,7 @@ jobs:
       - name: build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: thunder-mt
+          context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
