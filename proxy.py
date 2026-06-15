@@ -255,7 +255,7 @@ class URLProxy:
 __version__ = "0.0.2"
 
 _proxy_cache = {}
-_CACHE_TTL = 3600
+_CACHE_TTL = 300
 
 
 def _get_cached(backend_url):
