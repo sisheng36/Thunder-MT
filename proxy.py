@@ -317,7 +317,10 @@ def create_app(trunk, split, conns, headers):
         match = re.compile(r'bytes=(\d+)-(\d*)').match(range_str)
         begin, end = match.groups()
         begin = int(begin) if begin else 0
-        end = min(begin + proxy.trunk, size) - 1
+        if end:
+            end = min(int(end), begin + proxy.trunk, size - 1)
+        else:
+            end = min(begin + proxy.trunk, size) - 1
         length = end - begin + 1
         try:
             return StreamingResponse(
