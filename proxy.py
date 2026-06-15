@@ -310,10 +310,12 @@ def create_app(trunk, split, conns, headers):
         if not range_str:
             end = min(proxy.trunk, size) - 1
             length = end + 1
+            logging.info(f"无 Range: begin=0 end={end} length={length} trunk={proxy.trunk} size={size}")
             return StreamingResponse(
                 proxy.sorted_stream(begin=0, end=end),
                 headers={
                     'Content-Type': proxy.content_type,
+                    'Content-Range': f'bytes 0-{end}/{size}',
                     'Content-Length': str(length),
                     'Accept-Ranges': 'bytes',
                 },
@@ -328,6 +330,7 @@ def create_app(trunk, split, conns, headers):
         else:
             end = min(begin + proxy.trunk, size) - 1
         length = end - begin + 1
+        logging.info(f"Range: {range_str} → begin={begin} end={end} length={length} trunk={proxy.trunk} size={size}")
         try:
             return StreamingResponse(
                 proxy.sorted_stream(begin=begin, end=end),
@@ -356,4 +359,5 @@ if __name__ == '__main__':
 
     app = create_app(trunk, split, conns, headers)
     logging.info(f"Thunder-MT v{__version__} 启动，监听 {host}:{port}")
+    logging.info(f"配置: trunk={trunk} split={split} conns={conns}")
     uvicorn.run(app, host=host, port=port)
