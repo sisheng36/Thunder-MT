@@ -245,6 +245,8 @@ class URLProxy:
         tqdm_obj.update(100)
         print('下载完成')
 
+__version__ = "0.0.2"
+
 _proxy_cache = {}
 _CACHE_TTL = 3600
 
@@ -340,6 +342,7 @@ def create_app(trunk, split, conns, headers):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
     trunk = os.environ.get('TRUNK', '10M')
     split = os.environ.get('SPLIT', '1M')
     conns = int(os.environ.get('CONNS', '60'))
@@ -348,4 +351,5 @@ if __name__ == '__main__':
     headers = json.loads(os.environ.get('HEADERS', '{}'))
 
     app = create_app(trunk, split, conns, headers)
+    logging.info(f"Thunder-MT v{__version__} 启动，监听 {host}:{port}")
     uvicorn.run(app, host=host, port=port)
