@@ -1,13 +1,9 @@
-FROM golang:1.23-alpine AS builder
+FROM python:3.12-alpine
 
-WORKDIR /build
-COPY go.mod ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o thunder-mt .
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY core.py .
 
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
-COPY --from=builder /build/thunder-mt /usr/local/bin/thunder-mt
 EXPOSE 8010
-ENTRYPOINT ["thunder-mt"]
+ENTRYPOINT ["python", "core.py"]

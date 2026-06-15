@@ -5,18 +5,19 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      - LISTEN=:8010
-      - PIECE=1M
-      - BUFFER=50M
-      - WORKERS=10
-      - TIMEOUT=30s
-      - SESSION_TTL=120s
+      - LISTEN_HOST=0.0.0.0
+      - LISTEN_PORT=8010
+      - TRUNK=32M
+      - SPLIT=3M
+      - CONNS=4
+      - TIMEOUT=30
+      - SESSION_TTL=120
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8010/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 10s
     logging:
       driver: json-file
       options:

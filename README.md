@@ -1,39 +1,50 @@
 # Thunder-MT
 
-迅雷网盘多线程流引擎，配合 SmartStrm STRM 内容替换插件使用。
+迅雷云盘多线程流加速引擎（Forked from [qy527145/url_proxy](https://github.com/qy527145/url_proxy)）。
+
+配合 SmartStrm STRM 内容替换插件使用。
 
 ## 工作方式
 
 ```
-SmartStrm 内容替换插件
-  将 STRM 里: http://127.0.0.1:8024/smartstrm_fid/迅雷/...
-  替换为:     http://127.0.0.1:8010/stream?url=http://127.0.0.1:8024/smartstrm_fid/迅雷/...
-
-Thunder-MT (:8010)
-  收到 /stream 请求 → GET SS 地址拿 302 直链 → N 路并发下载 → 返回播放器
-```
-
-## 快速开始
-
-```bash
-go build -o thunder-mt .
-./thunder-mt --listen :8010 --piece 1M --buffer 50M --workers 10
+STRM 文件 → http://127.0.0.1:8010/stream?url=http://SS:8024/smartstrm_fid/迅雷/...
+              ↓
+         Thunder-MT
+           ├── resolve_direct_url: GET SS → 302 → 迅雷直链
+           ├── 懒初始化：首分片提取 Content-Range 获取文件大小
+           ├── ThreadPoolExecutor N 路并发分片下载
+           └── StreamingResponse 返回播放器
 ```
 
 ## 配置
 
-| 参数 | 默认 | 说明 |
+| 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `--listen` | `:8010` | 监听地址（与 STRM 替换后的地址一致） |
-| `--piece` | `1M` | 分片大小 |
-| `--buffer` | `50M` | 最大缓冲（每会话） |
-| `--workers` | `10` | 最大并发连接 |
-| `--timeout` | `30s` | 分片下载超时 |
-| `--session-ttl` | `120s` | 空闲会话清理间隔 |
+| `LISTEN_HOST` | `0.0.0.0` | 监听地址 |
+| `LISTEN_PORT` | `8010` | 监听端口 |
+| `TRUNK` | `32M` | 块大小 |
+| `SPLIT` | `3M` | 分片大小 |
+| `CONNS` | `4` | 并发线程数 |
+| `TIMEOUT` | `30` | 下载超时（秒） |
+| `SESSION_TTL` | `120` | 空闲会话清理间隔（秒） |
+
+## Docker Compose
+
+```bash
+docker compose up -d
+```
+
+## SmartStrm 集成
+
+SS 后台 → 插件管理 → STRM 内容替换：
+
+| 查找 | 替换 |
+|---|---|
+| `http://127.0.0.1:8024/smartstrm_fid/迅雷/` | `http://127.0.0.1:8010/stream?url=http://127.0.0.1:8024/smartstrm_fid/迅雷/` |
 
 ## 健康检查
 
 ```bash
 curl http://localhost:8010/health
-# {"status":"ok","sessions":1,"goroutines":15,"mem_mb":8.2}
+# {"status":"ok","sessions":2}
 ```
