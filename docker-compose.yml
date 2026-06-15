@@ -1,9 +1,7 @@
 services:
   proxy:
     container_name: thunder-mt
-    build: .
-    # 使用预构建镜像（取消注释下面一行，注释 build）
-    # image: ghcr.io/sisheng36/thunder-mt:latest
+    image: ghcr.io/sisheng36/thunder-mt:latest
     ports:
       - "8010:8010"
     environment:
