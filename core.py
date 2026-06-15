@@ -281,4 +281,4 @@ async def health():
 
 if __name__ == "__main__":
     threading.Thread(target=_session_gc, daemon=True).start()
-    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", http="h11", workers=2)
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", http="h11")
