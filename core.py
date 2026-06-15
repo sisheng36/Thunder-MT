@@ -10,7 +10,6 @@ Changes from upstream:
   - Environment variable configuration
 """
 
-import asyncio
 import os
 import re
 import threading
@@ -217,11 +216,7 @@ def _session_gc():
 
 
 @app.get("/stream")
-async def stream_handler(url: str, request: Request):
-    return await asyncio.to_thread(_stream_sync, url, request)
-
-
-def _stream_sync(url: str, request: Request):
+def stream_handler(url: str, request: Request):
     # Resolve SS URL → direct URL (with cache)
     direct_url = None
     with SS_CACHE_LOCK:
@@ -285,4 +280,4 @@ async def health():
 
 if __name__ == "__main__":
     threading.Thread(target=_session_gc, daemon=True).start()
-    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", http="h11")
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info", http="h11", workers=2)
