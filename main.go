@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"runtime"
 	"sort"
 	"strconv"
@@ -61,6 +62,49 @@ type Server struct {
 	cfg      Config
 	sessions sync.Map
 	sem      chan struct{}
+	urlCache sync.Map
+}
+
+type cacheEntry struct {
+	url   string
+	until time.Time
+}
+
+var extMIME = map[string]string{
+	".mkv":  "video/x-matroska",
+	".mp4":  "video/mp4",
+	".mov":  "video/quicktime",
+	".avi":  "video/x-msvideo",
+	".webm": "video/webm",
+	".ts":   "video/mp2t",
+	".m3u8": "application/vnd.apple.mpegurl",
+	".flv":  "video/x-flv",
+	".wmv":  "video/x-ms-wmv",
+	".m4v":  "video/mp4",
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func mimeByExt(rawURL, contentType string) string {
+	if !strings.HasPrefix(contentType, "application/octet-stream") &&
+		!strings.HasPrefix(contentType, "binary/") &&
+		contentType != "" {
+		return contentType
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return contentType
+	}
+	ext := strings.ToLower(path.Ext(u.Path))
+	if mt, ok := extMIME[ext]; ok {
+		return mt
+	}
+	return contentType
 }
 
 func parseSize(s string) (int64, error) {
@@ -244,17 +288,25 @@ func (s *Server) streamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("resolved: %s -> %s", ssURL, directURL)
+	log.Printf("resolved: %s -> %s", truncate(ssURL, 80), truncate(directURL, 80))
 
 	ss := s.getOrCreateSession(directURL)
 	if err := ss.serveHTTP(w, r); err != nil {
 		if err != context.Canceled {
-			log.Printf("serve error %q: %v", directURL, err)
+			log.Printf("serve error %q: %v", truncate(directURL, 80), err)
 		}
 	}
 }
 
 func (s *Server) resolveDirectURL(ssURL string) (string, error) {
+	if v, ok := s.urlCache.Load(ssURL); ok {
+		ce := v.(cacheEntry)
+		if time.Now().Before(ce.until) {
+			return ce.url, nil
+		}
+		s.urlCache.Delete(ssURL)
+	}
+
 	client := &http.Client{
 		Timeout: s.cfg.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -274,12 +326,14 @@ func (s *Server) resolveDirectURL(ssURL string) (string, error) {
 		if loc == "" {
 			return "", fmt.Errorf("SS returned %d without Location header", resp.StatusCode)
 		}
+		s.urlCache.Store(ssURL, cacheEntry{url: loc, until: time.Now().Add(30 * time.Second)})
 		return loc, nil
 	}
 
 	if resp.StatusCode == http.StatusOK {
 		ct := resp.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "audio/") {
+			s.urlCache.Store(ssURL, cacheEntry{url: ssURL, until: time.Now().Add(30 * time.Second)})
 			return ssURL, nil
 		}
 	}
@@ -383,7 +437,7 @@ func (s *Server) initSession(ss *session) {
 	ss.cond.Broadcast()
 
 	log.Printf("session start: size=%s type=%q url=%s",
-		formatSize(ss.contentLength), ss.contentType, ss.url)
+		formatSize(ss.contentLength), ss.contentType, truncate(ss.url, 80))
 
 	s.launchWorkers(ss)
 }
@@ -415,7 +469,7 @@ func (ss *session) fetchFileInfo() error {
 	}
 	defer resp.Body.Close()
 
-	ct := resp.Header.Get("Content-Type")
+	ct := mimeByExt(ss.url, resp.Header.Get("Content-Type"))
 	size := resp.ContentLength
 
 	if cr := resp.Header.Get("Content-Range"); cr != "" {
@@ -729,7 +783,7 @@ func (s *Server) sessionGC() {
 			if idle > s.cfg.TTL {
 				s.sessions.Delete(k)
 				ss.stop()
-				log.Printf("session GC: %s", ss.url)
+				log.Printf("session GC: %s", truncate(ss.url, 80))
 			}
 			return true
 		})
