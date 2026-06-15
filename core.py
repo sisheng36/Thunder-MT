@@ -67,10 +67,10 @@ def mime_by_ext(url: str, content_type: str) -> str:
     return EXT_MIME.get(ext, content_type)
 
 
-def resolve_direct_url(ss_url: str, timeout: int = TIMEOUT) -> str:
-    """GET SS smartstrm_fid address → extract 302 Location → return Xunlei direct URL."""
-    with httpx.Client(timeout=httpx.Timeout(timeout), follow_redirects=False) as c:
-        resp = c.get(ss_url)
+async def resolve_direct_url(ss_url: str, timeout: int = TIMEOUT) -> str:
+    """GET SS smartstrm_fid address -> extract 302 Location -> return Xunlei direct URL."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=False) as c:
+        resp = await c.get(ss_url)
         if resp.status_code in (301, 302, 307, 308):
             loc = resp.headers.get("Location", "")
             if loc:
@@ -224,7 +224,7 @@ async def stream_handler(url: str, request: Request):
         if entry and time.time() < entry[1]:
             direct_url = entry[0]
     if direct_url is None:
-        direct_url = resolve_direct_url(url)
+        direct_url = await resolve_direct_url(url)
         with SS_CACHE_LOCK:
             SS_CACHE[url] = (direct_url, time.time() + 30)
 
