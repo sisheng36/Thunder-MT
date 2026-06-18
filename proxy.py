@@ -256,6 +256,8 @@ class URLProxy:
 
 __version__ = "0.0.3"
 
+_RANGE_RE = re.compile(r'bytes=(\d+)-(\d*)')
+
 _proxy_cache = {}
 _CACHE_TTL = 300
 
@@ -328,7 +330,7 @@ def create_app(trunk, split, conns, headers):
                 status_code=200,
             )
 
-        match = re.compile(r'bytes=(\d+)-(\d*)').match(range_str)
+        match = _RANGE_RE.match(range_str)
         begin, end = match.groups()
         begin = int(begin) if begin else 0
         if end:
