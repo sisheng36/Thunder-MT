@@ -222,17 +222,19 @@ class URLProxy:
             chunks = {}
             next_pos = l
             executor = ThreadPoolExecutor(max_workers=self.workers)
-            futures = {}
-            for b, e in Spliter(begin=l, end=r).iter(split=split):
-                futures[executor.submit(self.source.get, b, e)] = b
-            for future in concurrent.futures.as_completed(futures):
-                chunk_data, chunk_begin, _ = future.result()
-                chunks[chunk_begin] = chunk_data
-                while next_pos in chunks:
-                    data = chunks.pop(next_pos)
-                    yield data
-                    next_pos += len(data)
-            executor.shutdown(wait=False)
+            try:
+                futures = {}
+                for b, e in Spliter(begin=l, end=r).iter(split=split):
+                    futures[executor.submit(self.source.get, b, e)] = b
+                for future in concurrent.futures.as_completed(futures):
+                    chunk_data, chunk_begin, _ = future.result()
+                    chunks[chunk_begin] = chunk_data
+                    while next_pos in chunks:
+                        data = chunks.pop(next_pos)
+                        yield data
+                        next_pos += len(data)
+            finally:
+                executor.shutdown(wait=False)
 
     def download(self):
         print('开始下载', self.file_name, '...')
