@@ -414,8 +414,6 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[DEBUG] UA=%s Range=%s", r.Header.Get("User-Agent"), r.Header.Get("Range"))
-
 	if strings.Contains(r.Header.Get("User-Agent"), "Lavf") {
 		log.Printf("Lavf 302 → %s", backendURL)
 		http.Redirect(w, r, backendURL, http.StatusFound)
