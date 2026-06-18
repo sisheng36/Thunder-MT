@@ -1,10 +1,8 @@
+import threading
 import time
 import concurrent
 import re
-from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import Pipe
-from multiprocessing import Process
 
 import httpx
 import uvicorn
@@ -16,21 +14,10 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 from humanfriendly import parse_size
-from tqdm import tqdm
 from urllib.parse import unquote
 
 
-class Source:
-    @abstractmethod
-    def get(self, begin, end):
-        pass
-
-    @abstractmethod
-    def info(self):
-        pass
-
-
-class URLSource(Source):
+class URLSource:
     def __init__(self, url, headers, cookies, conns=8):
         self.url = url
         self.headers = headers
@@ -58,15 +45,22 @@ class URLSource(Source):
                 match = re.search(r'filename\*=UTF-8\'\'(.+)', content_disposition)
                 if match:
                     file_name = match.group(1)
-                    file_name = unquote(file_name)
+                    try:
+                        file_name = unquote(file_name)
+                    except UnicodeEncodeError:
+                        pass
                 else:
                     file_name = os.path.basename(self.url.split("?")[0]) or "downloaded_file"
+                    try:
+                        file_name = unquote(file_name)
+                    except UnicodeEncodeError:
+                        pass
+            else:
+                file_name = os.path.basename(self.url.split("?")[0]) or "downloaded_file"
                 try:
                     file_name = unquote(file_name)
                 except UnicodeEncodeError:
                     pass
-            else:
-                file_name = os.path.basename(self.url.split("?")[0]) or "downloaded_file"
 
             length = int(resp.headers['Content-Range'].split('/')[-1])
             return content_type, file_name, length
@@ -77,32 +71,6 @@ class URLSource(Source):
         except httpx.HTTPStatusError as e:
             logging.error(f"获取文件信息HTTP状态码错误: {e}")
             raise
-
-
-class Selector:
-    def __init__(self, targets):
-        self.targets = targets
-
-        def loop():
-            while True:
-                for target in targets:
-                    yield target
-
-        self.gen = loop()
-
-    def select(self):
-        return next(self.gen)
-
-
-class SourceGroup(Source):
-    def __init__(self, selector: Selector):
-        self.selector = selector
-
-    def get(self, begin, end):
-        return self.selector.select().get(begin, end)
-
-    def info(self):
-        return self.selector.select().info()
 
 
 class Spliter:
@@ -146,17 +114,6 @@ class Spliter:
         return gen()
 
 
-def write_task(pipe, file_name):
-    msg = pipe.recv()
-    with open(file_name, "rb+") as f:
-        while msg is not None:
-            data, index = msg
-            f.seek(index)
-            f.write(data)
-            msg = pipe.recv()
-    pipe.send(None)
-
-
 class URLProxy:
     def __init__(
             self,
@@ -177,29 +134,9 @@ class URLProxy:
         if isinstance(split, str):
             split = parse_size(split, True)
         self.split = split
-        if isinstance(urls, list):
-            self.source = SourceGroup(Selector([URLSource(url, headers, cookies, conns) for url in urls]))
-            self.workers = conns * len(urls)
-        else:
-            self.source = URLSource(urls, headers, cookies, conns)
-            self.workers = conns
+        self.source = URLSource(urls, headers, cookies, conns)
+        self.workers = conns
         self.content_type, self.file_name, self.length = self.source.info()
-
-    def stream(self, *, begin=None, end=None, split=None):
-        if not begin:
-            begin = 0
-        if not end:
-            end = self.length - 1
-        if not split:
-            split = self.split
-        spliter = Spliter(begin=begin, end=end)
-        executor = ThreadPoolExecutor(max_workers=self.workers)
-
-        for future in concurrent.futures.as_completed(
-                [executor.submit(self.source.get, b, e) for b, e in spliter.iter(split=split)]
-        ):
-            content, b, e = future.result()
-            yield content, b, e
 
     def continuous_stream(self, begin=0):
         next_begin = begin
@@ -236,29 +173,12 @@ class URLProxy:
             finally:
                 executor.shutdown(wait=False)
 
-    def download(self):
-        print('开始下载', self.file_name, '...')
-        with open(self.file_name, "wb"):
-            pass
-
-        main, sub = Pipe()
-
-        sub_task = Process(target=write_task, args=(sub, self.file_name))
-        sub_task.start()
-        tqdm_obj = tqdm(total=self.length + 100, unit_scale=True)
-        for content, b, e in self.stream(split=self.split):
-            main.send((content, b))
-            tqdm_obj.update(len(content))
-        main.send(None)
-        main.recv()
-        tqdm_obj.update(100)
-        print('下载完成')
-
 __version__ = "0.0.3"
 
 _RANGE_RE = re.compile(r'bytes=(\d+)-(\d*)')
 
 _proxy_cache = {}
+_cache_lock = threading.Lock()
 _CACHE_TTL = 300
 
 
@@ -306,15 +226,18 @@ def create_app(trunk, split, conns, headers):
 
         proxy = _get_cached(backend_url)
         if proxy is None:
-            try:
-                direct_url = resolve_direct_url(backend_url, headers)
-            except Exception as e:
-                logging.error(f"解析直链失败: {e}")
-                raise HTTPException(status_code=502, detail="无法解析后端地址")
-            proxy = URLProxy(
-                urls=direct_url, trunk=trunk, split=split, conns=conns, headers=headers
-            )
-            _proxy_cache[backend_url] = (time.time(), proxy)
+            with _cache_lock:
+                proxy = _get_cached(backend_url)
+                if proxy is None:
+                    try:
+                        direct_url = resolve_direct_url(backend_url, headers)
+                    except Exception as e:
+                        logging.error(f"解析直链失败: {e}")
+                        raise HTTPException(status_code=502, detail="无法解析后端地址")
+                    proxy = URLProxy(
+                        urls=direct_url, trunk=trunk, split=split, conns=conns, headers=headers
+                    )
+                    _proxy_cache[backend_url] = (time.time(), proxy)
         size = proxy.length
 
         range_str = request.headers.get("Range")
@@ -324,6 +247,7 @@ def create_app(trunk, split, conns, headers):
                 proxy.continuous_stream(begin=0),
                 headers={
                     'Content-Type': proxy.content_type,
+                    'Content-Disposition': f'inline; filename="{proxy.file_name}"',
                     'Content-Length': str(size),
                     'Accept-Ranges': 'bytes',
                 },
@@ -331,6 +255,8 @@ def create_app(trunk, split, conns, headers):
             )
 
         match = _RANGE_RE.match(range_str)
+        if match is None:
+            raise HTTPException(status_code=416, detail="Invalid Range header")
         begin, end = match.groups()
         begin = int(begin) if begin else 0
         if end:
@@ -343,6 +269,7 @@ def create_app(trunk, split, conns, headers):
                     headers={
                         'Content-Range': f'bytes {begin}-{end}/{size}',
                         'Content-Type': proxy.content_type,
+                        'Content-Disposition': f'inline; filename="{proxy.file_name}"',
                         'Content-Length': str(length),
                         'Accept-Ranges': 'bytes',
                     },
@@ -358,6 +285,7 @@ def create_app(trunk, split, conns, headers):
                     headers={
                         'Content-Range': f'bytes {begin}-{size - 1}/{size}',
                         'Content-Type': proxy.content_type,
+                        'Content-Disposition': f'inline; filename="{proxy.file_name}"',
                         'Content-Length': str(size - begin),
                         'Accept-Ranges': 'bytes',
                     },
