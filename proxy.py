@@ -254,7 +254,7 @@ class URLProxy:
         tqdm_obj.update(100)
         print('下载完成')
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 _proxy_cache = {}
 _CACHE_TTL = 300
