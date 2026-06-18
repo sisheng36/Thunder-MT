@@ -416,6 +416,18 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[DEBUG] UA=%s Range=%s", r.Header.Get("User-Agent"), r.Header.Get("Range"))
 
+	if strings.Contains(r.Header.Get("User-Agent"), "Lavf") {
+		directURL, err := resolveDirectURL(backendURL, s.headers)
+		if err != nil {
+			log.Printf("Lavf 解析直链失败: %v", err)
+			http.Error(w, "无法解析后端地址", http.StatusBadGateway)
+			return
+		}
+		log.Printf("Lavf 302 → %s", directURL)
+		http.Redirect(w, r, directURL, http.StatusFound)
+		return
+	}
+
 	proxy, err := s.cache.getOrCreate(backendURL, func() (*urlProxy, error) {
 		directURL, err := resolveDirectURL(backendURL, s.headers)
 		if err != nil {
