@@ -1,5 +1,6 @@
 import threading
 import time
+import gc
 import concurrent
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -182,18 +183,26 @@ _cache_lock = threading.Lock()
 _CACHE_TTL = 300
 
 
+def _cleanup_expired():
+    now = time.time()
+    expired = [k for k, (ts, p) in _proxy_cache.items() if now - ts > _CACHE_TTL]
+    if expired:
+        for k in expired:
+            try:
+                _, old = _proxy_cache.pop(k)
+                old.source.session.close()
+            except Exception:
+                pass
+        gc.collect()
+        logging.info(f"缓存清理: {len(expired)} 项已过期")
+
+
 def _get_cached(backend_url):
+    _cleanup_expired()
     entry = _proxy_cache.get(backend_url)
     if entry is None:
         return None
     last_access, proxy = entry
-    if time.time() - last_access > _CACHE_TTL:
-        try:
-            proxy.source.session.close()
-        except Exception:
-            pass
-        del _proxy_cache[backend_url]
-        return None
     _proxy_cache[backend_url] = (time.time(), proxy)
     return proxy
 
