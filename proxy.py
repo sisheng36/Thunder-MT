@@ -184,17 +184,18 @@ _CACHE_TTL = 300
 
 
 def _cleanup_expired():
-    now = time.time()
-    expired = [k for k, (ts, p) in _proxy_cache.items() if now - ts > _CACHE_TTL]
-    if expired:
-        for k in expired:
-            try:
-                _, old = _proxy_cache.pop(k)
-                old.source.session.close()
-            except Exception:
-                pass
-        gc.collect()
-        logging.info(f"缓存清理: {len(expired)} 项已过期")
+    with _cache_lock:
+        now = time.time()
+        expired = [k for k, (ts, p) in list(_proxy_cache.items()) if now - ts > _CACHE_TTL]
+        if expired:
+            for k in expired:
+                try:
+                    _, old = _proxy_cache.pop(k)
+                    old.source.session.close()
+                except Exception:
+                    pass
+            gc.collect()
+            logging.info(f"缓存清理: {len(expired)} 项已过期")
 
 
 def _get_cached(backend_url):
