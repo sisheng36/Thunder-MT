@@ -221,10 +221,12 @@ def create_app(trunk, split, conns, headers):
 
     @app.get("/")
     def root():
+        _cleanup_expired()
         return {"service": "Thunder-MT", "version": __version__}
 
     @app.get("/health")
     def health():
+        _cleanup_expired()
         return {"status": "ok"}
 
     @app.get("/stream")
