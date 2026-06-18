@@ -214,18 +214,18 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 			mu.Unlock()
 
 			if len(flushed) > 0 {
-				writeMu.Lock()
 				for _, data := range flushed {
-					if _, err := w.Write(data); err != nil {
+					writeMu.Lock()
+					_, err := w.Write(data)
+					writeMu.Unlock()
+					if err != nil {
 						select {
 						case errCh <- err:
 						default:
 						}
-						writeMu.Unlock()
 						return
 					}
 				}
-				writeMu.Unlock()
 			}
 		}(pos, chunkEnd)
 	}
@@ -413,6 +413,8 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing 'url' parameter", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("[DEBUG] UA=%s Range=%s", r.Header.Get("User-Agent"), r.Header.Get("Range"))
 
 	proxy, err := s.cache.getOrCreate(backendURL, func() (*urlProxy, error) {
 		directURL, err := resolveDirectURL(backendURL, s.headers)
