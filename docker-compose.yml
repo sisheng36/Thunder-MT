@@ -8,13 +8,13 @@ services:
     environment:
       - TRUNK=120M       # 单次 Range 返回量 / 缓冲窗口
       - SPLIT=3M         # 并行下载分块大小
-      - CONNS=3          # 并行线程数
+      - CONNS=3          # 并行 goroutine 数
       - HOST=0.0.0.0
       - PORT=8010
       - HEADERS={}       # 请求直链时附加的 HTTP 头，JSON 格式
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8010/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -24,9 +24,3 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # 带宽有限时取消注释限制资源
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: "2"
-    #       memory: 512M

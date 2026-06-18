@@ -1,12 +1,11 @@
-FROM python:3.12-slim
-
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
+COPY go.mod ./
+COPY main.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /thunder-mt .
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY proxy.py .
-
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+COPY --from=builder /thunder-mt /thunder-mt
 EXPOSE 8010
-
-CMD ["python", "proxy.py"]
+CMD ["/thunder-mt"]
