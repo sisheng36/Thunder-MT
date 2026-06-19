@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -169,15 +170,56 @@ func (p *urlProxy) downloadChunk(begin, end int64) ([]byte, error) {
 	return buf[:n], nil
 }
 
+type chunkData struct {
+	start int64
+	data  []byte
+}
+
 func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 	chunkSize := p.split
-	chunks := make(map[int64][]byte)
-	var mu sync.Mutex
-	var writeMu sync.Mutex
-	nextPos := begin
+	totalChunks := int((end-begin)/chunkSize) + 1
+	chunkCh := make(chan chunkData, totalChunks)
+	errCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		chunks := make(map[int64][]byte)
+		nextPos := begin
+		received := 0
+
+		for received < totalChunks {
+			select {
+			case <-ctx.Done():
+				return
+			case ck, ok := <-chunkCh:
+				if !ok {
+					return
+				}
+				received++
+				chunks[ck.start] = ck.data
+				for {
+					d, ok := chunks[nextPos]
+					if !ok {
+						break
+					}
+					delete(chunks, nextPos)
+					if _, err := w.Write(d); err != nil {
+						cancel()
+						select {
+						case errCh <- err:
+						default:
+						}
+						return
+					}
+					nextPos += int64(len(d))
+				}
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, p.conns)
-	errCh := make(chan error, p.conns*2+1)
 
 	for pos := begin; pos <= end; pos += chunkSize {
 		chunkEnd := pos + chunkSize - 1
@@ -192,45 +234,22 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 
 			data, err := p.downloadChunk(start, chunkEnd)
 			if err != nil {
+				cancel()
 				select {
 				case errCh <- err:
 				default:
 				}
 				return
 			}
-
-			mu.Lock()
-			chunks[start] = data
-			flushed := make([][]byte, 0)
-			for {
-				d, ok := chunks[nextPos]
-				if !ok {
-					break
-				}
-				delete(chunks, nextPos)
-				flushed = append(flushed, d)
-				nextPos += int64(len(d))
-			}
-			mu.Unlock()
-
-			if len(flushed) > 0 {
-				for _, data := range flushed {
-					writeMu.Lock()
-					_, err := w.Write(data)
-					writeMu.Unlock()
-					if err != nil {
-						select {
-						case errCh <- err:
-						default:
-						}
-						return
-					}
-				}
+			select {
+			case chunkCh <- chunkData{start: start, data: data}:
+			case <-ctx.Done():
 			}
 		}(pos, chunkEnd)
 	}
 
 	wg.Wait()
+	close(chunkCh)
 
 	select {
 	case err := <-errCh:
@@ -463,6 +482,12 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	begin, _ := strconv.ParseInt(m[1], 10, 64)
 	endStr := m[2]
+
+	if begin >= size {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
 
 	if endStr != "" {
 		end, _ := strconv.ParseInt(endStr, 10, 64)
