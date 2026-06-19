@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-var version = "1.0.1"
+var version = "1.0.2"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameRe = regexp.MustCompile(`filename\*=UTF-8''(.+)`)
 
