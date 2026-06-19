@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-var version = "1.0.2"
+var version = "1.0.3"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameRe = regexp.MustCompile(`filename\*=UTF-8''(.+)`)
 
@@ -80,9 +80,7 @@ type urlProxy struct {
 }
 
 func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[string]string) (*urlProxy, error) {
-	transport := &http.Transport{
-		MaxConnsPerHost: conns,
-	}
+	transport := &http.Transport{}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   30 * time.Second,
