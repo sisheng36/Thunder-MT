@@ -232,12 +232,17 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 				received++
 				chunks[ck.start] = ck.data
 				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
 					d, ok := chunks[nextPos]
 					if !ok {
 						break
 					}
 					delete(chunks, nextPos)
-					if _, err := w.Write(d); err != nil {
+					if err := safeWrite(w, d); err != nil {
 						cancel()
 						select {
 						case errCh <- err:
@@ -688,6 +693,16 @@ func (s *statsCollector) load(path string) {
 			}
 		}
 	}
+}
+
+func safeWrite(w io.Writer, data []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("write panic: %v", r)
+		}
+	}()
+	_, err = w.Write(data)
+	return
 }
 
 type responseWriter struct {
