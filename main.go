@@ -662,7 +662,7 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-const dashboardHTML = ` + "`" + `<!DOCTYPE html>
+const dashboardHTML = `<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -699,6 +699,9 @@ tr:last-child td{border-bottom:none}
 .status-302{color:#fbbf24}
 .status-500{color:#f87171}
 .empty{text-align:center;color:#4b5563;padding:32px;font-style:italic}
+.badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600}
+.badge-ok{background:rgba(52,211,153,0.15);color:#34d399}
+.badge-err{background:rgba(248,113,113,0.15);color:#f87171}
 .footer{text-align:center;color:#374151;font-size:11px;margin-top:24px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .loading{animation:pulse 2s infinite}
@@ -706,15 +709,15 @@ tr:last-child td{border-bottom:none}
 </head>
 <body>
 <h1>Thunder-MT</h1>
-<div class="subtitle">Stats Dashboard <span id="clock"></span></div>
+<div class="subtitle">Stats Dashboard <span id="clock" class="loading"></span></div>
 <div class="grid">
-<div class="card"><div class="card-label">Stream Requests</div><div class="card-value blue" id="v-streams">-</div></div>
-<div class="card"><div class="card-label">ffprobe / Lavf</div><div class="card-value yellow" id="v-lavf">-</div></div>
+<div class="card"><div class="card-label">Streams</div><div class="card-value blue" id="v-streams">-</div></div>
+<div class="card"><div class="card-label">Lavf / ffprobe</div><div class="card-value yellow" id="v-lavf">-</div></div>
 <div class="card"><div class="card-label">Success Rate</div><div class="card-value green" id="v-rate">-</div></div>
 <div class="card"><div class="card-label">Cache Hits</div><div class="card-value blue" id="v-cache">-</div></div>
 <div class="card"><div class="card-label">Traffic</div><div class="card-value" id="v-bytes">-</div></div>
 <div class="card"><div class="card-label">Errors</div><div class="card-value red" id="v-errors">-</div></div>
-<div class="card"><div class="card-label">Active Streams</div><div class="card-value green" id="v-active">-</div></div>
+<div class="card"><div class="card-label">Active</div><div class="card-value green" id="v-active">-</div></div>
 <div class="card"><div class="card-label">Avg Latency</div><div class="card-value" id="v-latency">-</div></div>
 </div>
 <div class="chart-card">
@@ -739,32 +742,150 @@ tr:last-child td{border-bottom:none}
 </div>
 <div class="footer">Thunder-MT Proxy &middot; auto-refresh every 10s</div>
 <script>
-function fmt(n){return n!==undefined&&n!==null?n.toFixed(1):'-'}
-function hB(b){if(!b)return'0 B';var k=1024;if(b<k)return b+' B';var m=k*k;if(b<m)return(b/k).toFixed(1)+' KB';var g=m*k;if(b<g)return(b/m).toFixed(1)+' MB';return(b/g).toFixed(2)+' GB'}
-function hM(ms){return ms!=null?(ms<1000?ms+'ms':(ms/1000).toFixed(1)+'s'):'-'}
-var cr='1h',cd=null,cv=document.getElementById('chart'),cx=cv.getContext('2d');
-function draw(){var d=window.devicePixelRatio||1,r=cv.getBoundingClientRect();cv.width=r.width*d;cv.height=r.height*d;cx.setTransform(d,0,0,d,0,0);var w=r.width,h=r.height;cx.clearRect(0,0,w,h);var ds=[],ls=[];
-if(cr==='1h'||cr==='6h'||cr==='24h'){var n=cr==='1h'?1:cr==='6h'?6:24;var now=new Date().getHours();for(var i=n-1;i>=0;i--)ls.push(((now-i+24)%24)+':00');if(cd&&cd.hourly){for(var j=0;j<n;j++){var b=cd.hourly[(now-j+24)%24];ds.push(b?b.b:0)}ds.reverse()}}
-else{var days=cr==='7d'?7:cr==='15d'?15:30;if(cd&&cd.daily){var dl=cd.daily.slice(0,days).reverse();for(var k=0;k<dl.length;k++){ls.push(dl[k].date.slice(5));ds.push(dl[k].bytes||0)}}else{for(var d=0;d<Math.min(days,30);d++){ls.push('--');ds.push(0)}}}
-if(ds.length===0){cx.fillStyle='#4b5563';cx.font='14px sans-serif';cx.textAlign='center';cx.fillText('No data',w/2,h/2);return}
-var mx=Math.max.apply(null,ds);if(mx===0)mx=1;var pl=58,pr=16,pt=10,pb=32,pw=w-pl-pr,ph=h-pt-pb;
-cx.strokeStyle='rgba(255,255,255,0.06)';cx.lineWidth=1;
-for(var i=0;i<=4;i++){var y=pt+(ph/4)*i;cx.beginPath();cx.moveTo(pl,y);cx.lineTo(w-pr,y);cx.stroke();cx.fillStyle='#4b5563';cx.font='10px sans-serif';cx.textAlign='right';cx.fillText(i===0?hB(mx):hB(mx*(1-i/4)),pl-6,y+4)}
-var bw=pw/ds.length*.6,gap=pw/ds.length*.4;
-ds.forEach(function(v,i){var bh=(v/mx)*ph;var x=pl+i*(bw+gap)+gap/2;var y=h-pb-bh;cx.fillStyle='rgba(139,92,246,0.4)';cx.fillRect(x,y,bw,bh);cx.fillStyle='#6b7280';cx.font='10px sans-serif';cx.textAlign='center';var show=(cr==='24h'&&ls.length>12)?(i%4===0):(cr==='7d'||cr==='15d'||cr==='30d')?(i%Math.ceil(ls.length/8)===0):true;if(show)cx.fillText(ls[i],x+bw/2,h-pb+16)})
+function humanizeBytes(b){
+if(b===undefined||b===null)return'0 B';
+if(b<1024)return b+' B';
+var kb=b/1024;
+if(kb<1024)return kb.toFixed(1)+' KB';
+var mb=kb/1024;
+if(mb<1024)return mb.toFixed(1)+' MB';
+var gb=mb/1024;
+return gb.toFixed(2)+' GB';
 }
-function renderTable(logs){var t=document.getElementById('log-body');if(!logs||logs.length===0){t.innerHTML='<tr><td colspan="6" class="empty">No data yet</td></tr>';return}var s=logs.slice(0,10);var cl={'200':'status-200','302':'status-302','500':'status-500'};t.innerHTML=s.map(function(l){var c=cl[l.status]||'';return'<tr><td>'+l.time+'</td><td>'+l.ua+'</td><td>'+(l.range||'-')+'</td><td>'+hB(l.bytes)+'</td><td>'+hM(l.latency)+'</td><td class="'+c+'">'+l.status+'</td></tr>'}).join('')}
-function refresh(){fetch('/api/stats').then(function(r){return r.json()}).then(function(d){cd=d;document.getElementById('v-streams').textContent=d.streams||0;document.getElementById('v-lavf').textContent=d.lavf||0;document.getElementById('v-rate').textContent=fmt(d.successRate)+'%';document.getElementById('v-cache').textContent=d.cacheHits||0;document.getElementById('v-bytes').textContent=hB(d.totalBytes);document.getElementById('v-errors').textContent=d.errors||0;document.getElementById('v-active').textContent=d.active||0;document.getElementById('v-latency').textContent=hM(d.avgLatency);renderTable(d.logs);draw();document.getElementById('clock').textContent=new Date().toLocaleTimeString()}).catch(function(){})}
-document.querySelectorAll('.btn').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('.btn').forEach(function(x){x.classList.remove('active')});b.classList.add('active');cr=b.dataset.range;draw()})})
-refresh();setInterval(refresh,10000);window.addEventListener('resize',draw)
+function humanizeMs(ms){
+if(ms===undefined||ms===null)return'0ms';
+if(ms<1000)return ms+'ms';
+return(ms/1000).toFixed(1)+'s';
+}
+function fmtPct(v){
+if(v===undefined||v===null)return'-';
+return v.toFixed(1)+'%';
+}
+var chartRange='1h';
+var chartData=null;
+var canvas=document.getElementById('chart');
+var ctx=canvas.getContext('2d');
+function drawChart(){
+if(!canvas||!ctx)return;
+var dpr=window.devicePixelRatio||1;
+var rect=canvas.getBoundingClientRect();
+canvas.width=rect.width*dpr;
+canvas.height=rect.height*dpr;
+ctx.setTransform(dpr,0,0,dpr,0,0);
+var w=rect.width;
+var h=rect.height;
+ctx.clearRect(0,0,w,h);
+var datasets=[];
+var labels=[];
+if(chartRange==='1h'||chartRange==='6h'||chartRange==='24h'){
+var hours=chartRange==='1h'?1:chartRange==='6h'?6:24;
+var now=new Date().getHours();
+for(var i=hours-1;i>=0;i--){
+var hr=(now-i+24)%24;
+labels.push(hr+':00');
+}
+if(chartData&&chartData.hourly){
+for(var j=0;j<hours;j++){
+var idx=(now-j+24)%24;
+var bk=chartData.hourly[idx]||{b:0};
+datasets.push(bk.b);
+}
+datasets.reverse();
+}
+}else{
+var days=chartRange==='7d'?7:chartRange==='15d'?15:30;
+if(chartData&&chartData.daily){
+var dl=chartData.daily.slice(0,days).reverse();
+for(var k=0;k<dl.length;k++){
+labels.push(dl[k].date.slice(5));
+datasets.push(dl[k].bytes||0);
+}
+}else{
+for(var d=0;d<Math.min(days,30);d++){labels.push('--');datasets.push(0);}
+}
+}
+if(datasets.length===0){ctx.fillStyle='#4b5563';ctx.font='14px sans-serif';ctx.textAlign='center';ctx.fillText('No data',w/2,h/2);return}
+var maxVal=Math.max.apply(null,datasets);
+if(maxVal===0)maxVal=1;
+var padding={top:10,right:16,bottom:32,left:58};
+var pw=w-padding.left-padding.right;
+var ph=h-padding.top-padding.bottom;
+ctx.strokeStyle='rgba(255,255,255,0.06)';
+ctx.lineWidth=1;
+for(var i=0;i<=4;i++){
+var y=padding.top+(ph/4)*i;
+ctx.beginPath();
+ctx.moveTo(padding.left,y);
+ctx.lineTo(w-padding.right,y);
+ctx.stroke();
+var lbl=i===0?humanizeBytes(maxVal):humanizeBytes(maxVal*(1-i/4));
+ctx.fillStyle='#4b5563';
+ctx.font='10px sans-serif';
+ctx.textAlign='right';
+ctx.fillText(lbl,padding.left-6,y+4);
+}
+var gradient=ctx.createLinearGradient(0,padding.top,0,h-padding.bottom);
+gradient.addColorStop(0,'rgba(139,92,246,0.25)');
+gradient.addColorStop(1,'rgba(96,165,250,0.05)');
+ctx.beginPath();
+var barWidth=pw/datasets.length*.6;
+var gap=pw/datasets.length*.4;
+datasets.forEach(function(v,i){
+var barH=(v/maxVal)*ph;
+var x=padding.left+i*(barWidth+gap)+gap/2;
+var y=h-padding.bottom-barH;
+ctx.fillStyle=gradient;
+ctx.fillRect(x,y,barWidth,barH);
+ctx.fillStyle='#6b7280';
+ctx.font='10px sans-serif';
+ctx.textAlign='center';
+var showLabel=(chartRange==='24h'&&labels.length>12)?(i%4===0):(chartRange==='7d'||chartRange==='15d'||chartRange==='30d')?(i%Math.ceil(labels.length/8)===0):true;
+if(showLabel)ctx.fillText(labels[i],x+barWidth/2,h-padding.bottom+16);
+});
+}
+function updateClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString();document.getElementById('clock').classList.remove('loading');}
+function renderTable(logs){
+var tbody=document.getElementById('log-body');
+if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="6" class="empty">No data yet</td></tr>';return}
+var shown=logs.slice(0,10);
+var cls={'200':'status-200','302':'status-302','500':'status-500'};
+tbody.innerHTML=shown.map(function(l){
+var sc=cls[l.status]||'';
+var errBadge=l.error?' <span class="badge badge-err">'+l.error.substring(0,30)+'</span>':'';
+return'<tr><td>'+l.time+'</td><td>'+l.ua+'</td><td>'+l.range+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td class="'+sc+'">'+l.status+'</td></tr>';
+}).join('');
+}
+function refresh(){
+fetch('/api/stats').then(function(r){return r.json();}).then(function(d){
+chartData=d;
+document.getElementById('v-streams').textContent=d.streams||0;
+document.getElementById('v-lavf').textContent=d.lavf||0;
+document.getElementById('v-rate').textContent=fmtPct(d.successRate);
+document.getElementById('v-cache').textContent=d.cacheHits||0;
+document.getElementById('v-bytes').textContent=humanizeBytes(d.totalBytes);
+document.getElementById('v-errors').textContent=d.errors||0;
+document.getElementById('v-active').textContent=d.active||0;
+document.getElementById('v-latency').textContent=humanizeMs(d.avgLatency);
+renderTable(d.logs);
+drawChart();
+updateClock();
+}).catch(function(){});
+}
+document.querySelectorAll('.btn').forEach(function(b){
+b.addEventListener('click',function(){
+document.querySelectorAll('.btn').forEach(function(x){x.classList.remove('active');});
+b.classList.add('active');
+chartRange=b.dataset.range;
+drawChart();
+});
+});
+refresh();
+setInterval(refresh,10000);
+window.addEventListener('resize',drawChart);
 </script>
 </body>
-</html>` + "`" + `
+</html>`
 
-func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
-}
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
