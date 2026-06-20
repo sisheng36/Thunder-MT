@@ -12,19 +12,23 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_id: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_id: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: login to ghcr
         uses: docker/login-action@v3
@@ -33,12 +37,97 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build and push Docker image
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=thunder-mt-${{ github.ref_name }}-${{ matrix.platform_id }}
+            type=gha,scope=thunder-mt-${{ matrix.platform_id }}
+          cache-to: type=gha,mode=max,scope=thunder-mt-${{ github.ref_name }}-${{ matrix.platform_id }}
+
+      - name: export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform_id }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: download digest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: create and push multi-arch manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          cd /tmp/digests
+          mapfile -t tag_list <<<"$TAGS"
+          tag_args=()
+          for tag in "${tag_list[@]}"; do
+            [ -n "$tag" ] && tag_args+=("-t" "$tag")
+          done
+          refs=()
+          for digest in *; do
+            refs+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:latest"
