@@ -177,8 +177,10 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	writerDone := make(chan struct{})
 
 	go func() {
+		defer close(writerDone)
 		chunks := make(map[int64][]byte)
 		nextPos := begin
 		received := 0
@@ -245,6 +247,7 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 
 	wg.Wait()
 	close(chunkCh)
+	<-writerDone
 
 	select {
 	case err := <-errCh:
