@@ -480,7 +480,7 @@ func (s *statsCollector) recordEnd(start time.Time, ua, rangeStr string, bytes i
 		s.Hourly[now.Hour()].Lavf++
 		return
 	}
-	if err != nil {
+	if isFatal(err) {
 		s.TotalErrors++
 		s.Hourly[now.Hour()].Errors++
 	} else {
@@ -489,7 +489,7 @@ func (s *statsCollector) recordEnd(start time.Time, ua, rangeStr string, bytes i
 	s.TotalBytes += bytes
 	s.Hourly[now.Hour()].Bytes += bytes
 	entry := logEntry{Time: now.Format("15:04:05"), UA: shortUA(ua), Range: rangeStr, Bytes: bytes, Latency: latency}
-	if err != nil {
+	if isFatal(err) {
 		entry.Error = err.Error()
 		entry.Status = 500
 	} else if isLavf {
