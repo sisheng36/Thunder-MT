@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -702,6 +701,12 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+func (w *responseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 type server struct {
 	trunk   int64
 	split   int64
@@ -962,6 +967,7 @@ func (s *server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	start := stats.recordStart()
+	rangeHeader := r.Header.Get("Range")
 	wr := &responseWriter{ResponseWriter: w}
 
 	backendURL := r.URL.Query().Get("url")
@@ -993,7 +999,6 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	size := proxy.length
-	rangeHeader := r.Header.Get("Range")
 
 	disposition := fmt.Sprintf(`inline; filename="%s"`, proxy.fileName)
 	wr.Header().Set("Content-Type", proxy.contentType)
@@ -1005,9 +1010,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		wr.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		wr.WriteHeader(http.StatusOK)
 
-		if f, ok := wr.(http.Flusher); ok {
-			f.Flush()
-		}
+		wr.Flush()
 		streamErr := proxy.continuousStream(0, wr)
 		if streamErr != nil {
 			log.Printf("连续流错误: %v", streamErr)
@@ -1048,9 +1051,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		wr.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		wr.WriteHeader(http.StatusPartialContent)
 
-		if f, ok := wr.(http.Flusher); ok {
-			f.Flush()
-		}
+		wr.Flush()
 		streamErr := proxy.sortedStream(begin, end, wr)
 		if streamErr != nil {
 			log.Printf("sortedStream 错误: %v", streamErr)
@@ -1063,9 +1064,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		wr.Header().Set("Content-Length", strconv.FormatInt(size-begin, 10))
 		wr.WriteHeader(http.StatusPartialContent)
 
-		if f, ok := wr.(http.Flusher); ok {
-			f.Flush()
-		}
+		wr.Flush()
 		streamErr := proxy.continuousStream(begin, wr)
 		if streamErr != nil {
 			log.Printf("连续流错误: %v", streamErr)
