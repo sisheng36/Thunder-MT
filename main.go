@@ -81,13 +81,7 @@ type urlProxy struct {
 }
 
 func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[string]string) (*urlProxy, error) {
-	transport := &http.Transport{
-		MaxConnsPerHost: conns,
-	}
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
