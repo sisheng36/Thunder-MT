@@ -661,6 +661,18 @@ func isFatal(err error) bool {
 	return !strings.Contains(msg, "broken pipe") && !strings.Contains(msg, "connection reset")
 }
 
+func flushHeaders(w http.ResponseWriter, contentRange string, contentLength int64) {
+	w.Header().Set("Content-Range", contentRange)
+	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	w.WriteHeader(http.StatusPartialContent)
+}
+
+func logIfFatal(err error, format string, args ...interface{}) {
+	if isFatal(err) {
+		log.Printf(format, args...)
+	}
+}
+
 func newServer(trunk, split string, conns int, headers map[string]string) *server {
 	cacheTTL := 300 * time.Second
 	return &server{
@@ -977,16 +989,9 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			firstEnd = size - 1
 		}
 		log.Printf("无 Range: 首 chunk 0→%d, size=%d", firstEnd, size)
-		wr.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", firstEnd, size))
-		wr.Header().Set("Content-Length", strconv.FormatInt(firstEnd+1, 10))
-		wr.WriteHeader(http.StatusPartialContent)
-		if f, ok := wr.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
-		}
+		flushHeaders(wr, fmt.Sprintf("bytes 0-%d/%d", firstEnd, size), firstEnd+1)
 		streamErr = proxy.sortedStream(0, firstEnd, wr)
-		if isFatal(streamErr) {
-			log.Printf("连续流错误: %v", streamErr)
-		}
+		logIfFatal(streamErr, "连续流错误: %v", streamErr)
 		stats.recordEnd(start, ua, rangeHeader, wr.wrote, false, streamErr)
 		return
 	}
@@ -1018,28 +1023,14 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		length := end - begin + 1
 		log.Printf("Range(B): %s → begin=%d end=%d length=%d", rangeHeader, begin, end, length)
-		wr.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, size))
-		wr.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-		wr.WriteHeader(http.StatusPartialContent)
-		if f, ok := wr.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
-		}
+		flushHeaders(wr, fmt.Sprintf("bytes %d-%d/%d", begin, end, size), length)
 		streamErr = proxy.sortedStream(begin, end, wr)
-		if isFatal(streamErr) {
-			log.Printf("sortedStream 错误: %v", streamErr)
-		}
+		logIfFatal(streamErr, "sortedStream 错误: %v", streamErr)
 	} else {
 		log.Printf("Range(U): %s 连续流 %d→%d", rangeHeader, begin, size)
-		wr.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, size-1, size))
-		wr.Header().Set("Content-Length", strconv.FormatInt(size-begin, 10))
-		wr.WriteHeader(http.StatusPartialContent)
-		if f, ok := wr.ResponseWriter.(http.Flusher); ok {
-			f.Flush()
-		}
+		flushHeaders(wr, fmt.Sprintf("bytes %d-%d/%d", begin, size-1, size), size-begin)
 		streamErr = proxy.continuousStream(begin, wr)
-		if isFatal(streamErr) {
-			log.Printf("连续流错误: %v", streamErr)
-		}
+		logIfFatal(streamErr, "连续流错误: %v", streamErr)
 	}
 	stats.recordEnd(start, ua, rangeHeader, wr.wrote, false, streamErr)
 }
