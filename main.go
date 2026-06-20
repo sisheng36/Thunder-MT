@@ -343,6 +343,7 @@ func (pc *proxyCache) get(key string) *urlProxy {
 	pc.mu.Lock()
 	entry.lastAccess = time.Now()
 	pc.mu.Unlock()
+	stats.recordCacheHit()
 	return entry.proxy
 }
 
@@ -361,6 +362,7 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 	if entry, ok := pc.items[key]; ok {
 		pc.mu.Unlock()
 		entry.lastAccess = time.Now()
+		stats.recordCacheHit()
 		return entry.proxy, nil
 	}
 	pc.mu.Unlock()
@@ -375,6 +377,7 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 		pc.mu.Unlock()
 		proxy.client.CloseIdleConnections()
 		entry.lastAccess = time.Now()
+		stats.recordCacheHit()
 		return entry.proxy, nil
 	}
 	pc.items[key] = &cachedProxy{lastAccess: time.Now(), proxy: proxy}
@@ -665,6 +668,9 @@ func flushHeaders(w http.ResponseWriter, contentRange string, contentLength int6
 	w.Header().Set("Content-Range", contentRange)
 	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 	w.WriteHeader(http.StatusPartialContent)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func logIfFatal(err error, format string, args ...interface{}) {
