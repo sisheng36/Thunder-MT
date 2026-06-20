@@ -75,16 +75,11 @@ type urlProxy struct {
 	trunk       int64
 	split       int64
 	conns       int
-	client      *http.Client
 	headers     map[string]string
 }
 
 func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[string]string) (*urlProxy, error) {
-	transport := &http.Transport{}
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
@@ -135,12 +130,11 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 		trunk:       trunk,
 		split:       split,
 		conns:       conns,
-		client:      client,
 		headers:     headers,
 	}, nil
 }
 
-func (p *urlProxy) downloadChunk(begin, end int64) ([]byte, error) {
+func (p *urlProxy) downloadChunk(client *http.Client, begin, end int64) ([]byte, error) {
 	req, err := http.NewRequest("GET", p.url, nil)
 	if err != nil {
 		return nil, err
@@ -150,7 +144,7 @@ func (p *urlProxy) downloadChunk(begin, end int64) ([]byte, error) {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +174,12 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	transport := &http.Transport{
+		MaxConnsPerHost: p.conns,
+	}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	defer transport.CloseIdleConnections()
 
 	go func() {
 		chunks := make(map[int64][]byte)
@@ -230,7 +230,7 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, err := p.downloadChunk(start, chunkEnd)
+			data, err := p.downloadChunk(client, start, chunkEnd)
 			if err != nil {
 				cancel()
 				select {
@@ -307,7 +307,6 @@ func (pc *proxyCache) cleanup() {
 	cleaned := 0
 	for k, v := range pc.items {
 		if now.Sub(v.lastAccess) > pc.ttl {
-			v.proxy.client.CloseIdleConnections()
 			delete(pc.items, k)
 			cleaned++
 		}
@@ -357,7 +356,6 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 	pc.mu.Lock()
 	if entry, ok := pc.items[key]; ok {
 		pc.mu.Unlock()
-		proxy.client.CloseIdleConnections()
 		entry.lastAccess = time.Now()
 		return entry.proxy, nil
 	}
