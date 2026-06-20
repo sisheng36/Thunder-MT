@@ -136,8 +136,8 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 	}, nil
 }
 
-func (p *urlProxy) downloadChunk(client *http.Client, begin, end int64) ([]byte, error) {
-	req, err := http.NewRequest("GET", p.url, nil)
+func (p *urlProxy) downloadChunk(ctx context.Context, client *http.Client, begin, end int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -146,22 +146,56 @@ func (p *urlProxy) downloadChunk(client *http.Client, begin, end int64) ([]byte,
 		req.Header.Set(k, v)
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var lastErr error
+	for retry := 0; retry < 2; retry++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			if retry < 1 {
+				time.Sleep(500 * time.Millisecond)
+				req, _ = http.NewRequestWithContext(ctx, "GET", p.url, nil)
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
+				for k, v := range p.headers {
+					req.Header.Set(k, v)
+				}
+			}
+			continue
+		}
 
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载失败: %d", resp.StatusCode)
-	}
+		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("下载失败: %d", resp.StatusCode)
+			if resp.StatusCode == 503 && retry < 1 {
+				time.Sleep(time.Second)
+				req, _ = http.NewRequestWithContext(ctx, "GET", p.url, nil)
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
+				for k, v := range p.headers {
+					req.Header.Set(k, v)
+				}
+				continue
+			}
+			return nil, lastErr
+		}
 
-	buf := make([]byte, end-begin+1)
-	n, err := io.ReadFull(resp.Body, buf)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return nil, err
+		buf := make([]byte, end-begin+1)
+		n, err := io.ReadFull(resp.Body, buf)
+		resp.Body.Close()
+		if err != nil && err != io.ErrUnexpectedEOF {
+			lastErr = err
+			if retry < 1 {
+				time.Sleep(500 * time.Millisecond)
+				req, _ = http.NewRequestWithContext(ctx, "GET", p.url, nil)
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
+				for k, v := range p.headers {
+					req.Header.Set(k, v)
+				}
+				continue
+			}
+			return nil, err
+		}
+		return buf[:n], nil
 	}
-	return buf[:n], nil
+	return nil, lastErr
 }
 
 type chunkData struct {
@@ -232,7 +266,7 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, err := p.downloadChunk(client, start, chunkEnd)
+			data, err := p.downloadChunk(ctx, client, start, chunkEnd)
 			if err != nil {
 				cancel()
 				select {
