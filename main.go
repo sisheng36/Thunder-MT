@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-var version = "1.0.1"
+var version = "1.0.4"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameRe = regexp.MustCompile(`filename\*=UTF-8''(.+)`)
 
@@ -656,10 +656,15 @@ type responseWriter struct {
 	wrote int64
 }
 
-func (w *responseWriter) Write(b []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(b)
+func (w *responseWriter) Write(b []byte) (n int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("write panic: %v", r)
+		}
+	}()
+	n, err = w.ResponseWriter.Write(b)
 	w.wrote += int64(n)
-	return n, err
+	return
 }
 
 const dashboardHTML = `<!DOCTYPE html>
