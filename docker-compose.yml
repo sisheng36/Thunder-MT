@@ -6,6 +6,7 @@ services:
     ports:
       - "8010:8010"
     environment:
+      - TZ=Asia/Shanghai
       - TRUNK=120M       # 单次 Range 返回量 / 缓冲窗口
       - SPLIT=3M         # 并行下载分块大小
       - CONNS=3          # 并行 goroutine 数
