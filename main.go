@@ -143,8 +143,8 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 	}, nil
 }
 
-func (p *urlProxy) downloadChunk(begin, end int64) ([]byte, error) {
-	req, err := http.NewRequest("GET", p.url, nil)
+func (p *urlProxy) downloadChunk(ctx context.Context, begin, end int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, err := p.downloadChunk(start, chunkEnd)
+			data, err := p.downloadChunk(ctx, start, chunkEnd)
 			if err != nil {
 				cancel()
 				select {
