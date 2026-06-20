@@ -138,31 +138,47 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 }
 
 func (p *urlProxy) downloadChunk(ctx context.Context, begin, end int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
-	for k, v := range p.headers {
-		req.Header.Set(k, v)
-	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
+		for k, v := range p.headers {
+			req.Header.Set(k, v)
+		}
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := p.client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
 
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载失败: %d", resp.StatusCode)
-	}
+		if resp.StatusCode == 503 && attempt == 0 {
+			resp.Body.Close()
+			time.Sleep(time.Second)
+			continue
+		}
+		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("下载失败: %d", resp.StatusCode)
+		}
 
-	buf := make([]byte, end-begin+1)
-	n, err := io.ReadFull(resp.Body, buf)
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return nil, err
+		buf := make([]byte, end-begin+1)
+		n, err := io.ReadFull(resp.Body, buf)
+		resp.Body.Close()
+		if err != nil && err != io.ErrUnexpectedEOF {
+			lastErr = err
+			if attempt < 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return nil, err
+		}
+		return buf[:n], nil
 	}
-	return buf[:n], nil
+	return nil, lastErr
 }
 
 type chunkData struct {
@@ -948,13 +964,18 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	var streamErr error
 
 	if rangeHeader == "" {
-		log.Printf("无 Range: 连续流 0→%d, trunk=%d", size, proxy.trunk)
-		wr.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		wr.WriteHeader(http.StatusOK)
+		firstEnd := proxy.split - 1
+		if firstEnd >= size {
+			firstEnd = size - 1
+		}
+		log.Printf("无 Range: 首 chunk 0→%d, size=%d", firstEnd, size)
+		wr.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", firstEnd, size))
+		wr.Header().Set("Content-Length", strconv.FormatInt(firstEnd+1, 10))
+		wr.WriteHeader(http.StatusPartialContent)
 		if f, ok := wr.ResponseWriter.(http.Flusher); ok {
 			f.Flush()
 		}
-		streamErr = proxy.continuousStream(0, wr)
+		streamErr = proxy.sortedStream(0, firstEnd, wr)
 		if streamErr != nil {
 			log.Printf("连续流错误: %v", streamErr)
 		}
