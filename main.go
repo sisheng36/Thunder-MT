@@ -653,6 +653,14 @@ type server struct {
 	cache   *proxyCache
 }
 
+func isFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return !strings.Contains(msg, "broken pipe") && !strings.Contains(msg, "connection reset")
+}
+
 func newServer(trunk, split string, conns int, headers map[string]string) *server {
 	cacheTTL := 300 * time.Second
 	return &server{
@@ -976,7 +984,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 		streamErr = proxy.sortedStream(0, firstEnd, wr)
-		if streamErr != nil {
+		if isFatal(streamErr) {
 			log.Printf("连续流错误: %v", streamErr)
 		}
 		stats.recordEnd(start, ua, rangeHeader, wr.wrote, false, streamErr)
@@ -1017,7 +1025,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 		streamErr = proxy.sortedStream(begin, end, wr)
-		if streamErr != nil {
+		if isFatal(streamErr) {
 			log.Printf("sortedStream 错误: %v", streamErr)
 		}
 	} else {
@@ -1029,7 +1037,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 		streamErr = proxy.continuousStream(begin, wr)
-		if streamErr != nil {
+		if isFatal(streamErr) {
 			log.Printf("连续流错误: %v", streamErr)
 		}
 	}
