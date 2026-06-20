@@ -13,6 +13,8 @@ services:
       - HOST=0.0.0.0
       - PORT=8010
       - HEADERS={}       # 请求直链时附加的 HTTP 头，JSON 格式
+    volumes:
+      - ./data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8010/health"]

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -393,6 +395,279 @@ func resolveDirectURL(backendURL string, headers map[string]string) (string, err
 	return resp.Request.URL.String(), nil
 }
 
+type hourlyBucket struct {
+	Hour    int   `json:"h"`
+	Bytes   int64 `json:"b"`
+	Streams int64 `json:"s"`
+	Lavf    int64 `json:"l"`
+	Errors  int64 `json:"e"`
+}
+
+type dailyRecord struct {
+	Date    string `json:"date"`
+	Bytes   int64  `json:"bytes"`
+	Streams int64  `json:"streams"`
+	Lavf    int64  `json:"lavf"`
+	Errors  int64  `json:"errors"`
+}
+
+type logEntry struct {
+	Time    string `json:"time"`
+	UA      string `json:"ua"`
+	Range   string `json:"range"`
+	Bytes   int64  `json:"bytes"`
+	Latency int64  `json:"latency"`
+	Status  int    `json:"status"`
+	Error   string `json:"error,omitempty"`
+}
+
+type statsCollector struct {
+	mu sync.Mutex
+
+	Date string
+
+	TotalStreams  int64
+	TotalLavf     int64
+	TotalSuccess  int64
+	TotalErrors   int64
+	TotalBytes    int64
+	TotalLatency  int64
+	CacheHits     int64
+	ActiveStreams int32
+
+	Hourly [24]hourlyBucket
+	Daily  []dailyRecord
+	Logs   []logEntry
+	LogMax int
+}
+
+var stats = &statsCollector{
+	LogMax: 50,
+	Date:   time.Now().Format("2006-01-02"),
+	Daily:  make([]dailyRecord, 0),
+	Logs:   make([]logEntry, 0, 50),
+}
+
+func (s *statsCollector) recordStart() time.Time {
+	s.mu.Lock()
+	s.checkDate()
+	s.mu.Unlock()
+	return time.Now()
+}
+
+func (s *statsCollector) recordEnd(start time.Time, ua, rangeStr string, bytes int64, isLavf bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.checkDate()
+
+	now := time.Now()
+	hour := now.Hour()
+	latency := now.Sub(start).Milliseconds()
+
+	s.TotalStreams++
+	s.TotalLatency += latency
+	s.Hourly[hour].Streams++
+
+	if isLavf {
+		s.TotalLavf++
+		s.Hourly[hour].Lavf++
+		return
+	}
+
+	if err != nil {
+		s.TotalErrors++
+		s.Hourly[hour].Errors++
+	} else {
+		s.TotalSuccess++
+	}
+
+	s.TotalBytes += bytes
+	s.Hourly[hour].Bytes += bytes
+
+	entry := logEntry{
+		Time:    now.Format("15:04:05"),
+		UA:      shortUA(ua),
+		Range:   rangeStr,
+		Bytes:   bytes,
+		Latency: latency,
+	}
+	if err != nil {
+		entry.Error = err.Error()
+		entry.Status = 500
+	} else if isLavf {
+		entry.Status = 302
+	} else {
+		entry.Status = 200
+	}
+	s.Logs = append([]logEntry{entry}, s.Logs...)
+	if len(s.Logs) > s.LogMax {
+		s.Logs = s.Logs[:s.LogMax]
+	}
+}
+
+func (s *statsCollector) recordCacheHit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CacheHits++
+}
+
+func (s *statsCollector) incActive(delta int32) {
+	s.mu.Lock()
+	s.ActiveStreams += delta
+	s.mu.Unlock()
+}
+
+func (s *statsCollector) checkDate() {
+	today := time.Now().Format("2006-01-02")
+	if today == s.Date {
+		return
+	}
+	d := s.Date
+	var dayBytes, dayStreams, dayLavf, dayErrors int64
+	for _, h := range s.Hourly {
+		dayBytes += h.Bytes
+		dayStreams += h.Streams
+		dayLavf += h.Lavf
+		dayErrors += h.Errors
+	}
+	s.Daily = append([]dailyRecord{{Date: d, Bytes: dayBytes, Streams: dayStreams, Lavf: dayLavf, Errors: dayErrors}}, s.Daily...)
+	if len(s.Daily) > 30 {
+		s.Daily = s.Daily[:30]
+	}
+	s.Date = today
+	s.TotalBytes = 0
+	s.TotalStreams = 0
+	s.TotalLavf = 0
+	s.TotalSuccess = 0
+	s.TotalErrors = 0
+	s.TotalLatency = 0
+	s.CacheHits = 0
+	s.Hourly = [24]hourlyBucket{}
+}
+
+func shortUA(ua string) string {
+	if strings.Contains(ua, "Lavf") {
+		return "ffprobe"
+	}
+	if strings.Contains(ua, "libmpv") {
+		return "mpv"
+	}
+	if strings.Contains(ua, "Infuse") {
+		return "Infuse"
+	}
+	if ua == "" {
+		return "-"
+	}
+	if len(ua) > 30 {
+		return ua[:30]
+	}
+	return ua
+}
+
+func (s *statsCollector) snapshot() map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := s.TotalStreams + s.TotalLavf
+	successRate := 0.0
+	if s.TotalStreams > 0 {
+		successRate = float64(s.TotalSuccess) / float64(s.TotalStreams) * 100
+	}
+	avgLatency := int64(0)
+	if total > 0 {
+		avgLatency = s.TotalLatency / total
+	}
+	return map[string]interface{}{
+		"date":        s.Date,
+		"streams":     s.TotalStreams,
+		"lavf":        s.TotalLavf,
+		"successRate": successRate,
+		"totalBytes":  s.TotalBytes,
+		"errors":      s.TotalErrors,
+		"avgLatency":  avgLatency,
+		"cacheHits":   s.CacheHits,
+		"active":      s.ActiveStreams,
+		"hourly":      s.Hourly[:],
+		"daily":       s.Daily,
+		"logs":        s.Logs,
+	}
+}
+
+func (s *statsCollector) save(path string) {
+	data, _ := json.MarshalIndent(s.snapshot(), "", "  ")
+	os.WriteFile(path, data, 0644)
+}
+
+func (s *statsCollector) load(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var snap map[string]interface{}
+	if json.Unmarshal(data, &snap) != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := snap["date"].(string); ok {
+		if v == time.Now().Format("2006-01-02") {
+			s.Date = v
+			if n, ok := snap["streams"].(float64); ok {
+				s.TotalStreams = int64(n)
+			}
+			if n, ok := snap["lavf"].(float64); ok {
+				s.TotalLavf = int64(n)
+			}
+			if n, ok := snap["errors"].(float64); ok {
+				s.TotalErrors = int64(n)
+			}
+			if n, ok := snap["totalBytes"].(float64); ok {
+				s.TotalBytes = int64(n)
+			}
+			if n, ok := snap["cacheHits"].(float64); ok {
+				s.CacheHits = int64(n)
+			}
+			if n, ok := snap["successRate"].(float64); ok {
+				s.TotalSuccess = int64(float64(s.TotalStreams) * n / 100)
+			}
+		}
+	}
+	if daily, ok := snap["daily"].([]interface{}); ok {
+		for _, d := range daily {
+			if dm, ok := d.(map[string]interface{}); ok {
+				dr := dailyRecord{}
+				if date, ok := dm["date"].(string); ok {
+					dr.Date = date
+				}
+				if b, ok := dm["bytes"].(float64); ok {
+					dr.Bytes = int64(b)
+				}
+				if ss, ok := dm["streams"].(float64); ok {
+					dr.Streams = int64(ss)
+				}
+				if l, ok := dm["lavf"].(float64); ok {
+					dr.Lavf = int64(l)
+				}
+				if e, ok := dm["errors"].(float64); ok {
+					dr.Errors = int64(e)
+				}
+				s.Daily = append(s.Daily, dr)
+			}
+		}
+	}
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	bytes int64
+}
+
+func (w *responseWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += int64(n)
+	return n, err
+}
+
 type server struct {
 	trunk   int64
 	split   int64
@@ -417,21 +692,255 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thunder-MT Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#0f0f1a 0%,#1a1025 50%,#0f0f1a 100%);color:#e0e0e0;min-height:100vh;padding:20px}
+h1{font-size:24px;font-weight:600;margin-bottom:4px;background:linear-gradient(135deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{color:#6b7280;font-size:13px;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+.card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transition:transform .15s,border-color .15s}
+.card:hover{transform:translateY(-1px);border-color:rgba(255,255,255,0.15)}
+.card-label{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card-value{font-size:26px;font-weight:700;color:#f0f0f0}
+.card-value.green{color:#34d399}
+.card-value.blue{color:#60a5fa}
+.card-value.yellow{color:#fbbf24}
+.card-value.red{color:#f87171}
+.chart-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);margin-bottom:24px}
+.chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+.chart-title{font-size:14px;font-weight:600}
+.btn-group{display:flex;gap:4px}
+.btn{padding:5px 12px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.05);color:#9ca3af;border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s}
+.btn:hover{background:rgba(255,255,255,0.10);color:#e0e0e0}
+.btn.active{background:rgba(139,92,246,0.25);border-color:rgba(139,92,246,0.5);color:#a78bfa}
+canvas{width:100%;height:260px}
+.table-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;color:#6b7280;font-weight:500;border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;text-transform:uppercase}
+td{padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.04);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.status-200{color:#34d399}
+.status-302{color:#fbbf24}
+.status-500{color:#f87171}
+.empty{text-align:center;color:#4b5563;padding:32px;font-style:italic}
+.badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600}
+.badge-ok{background:rgba(52,211,153,0.15);color:#34d399}
+.badge-err{background:rgba(248,113,113,0.15);color:#f87171}
+.footer{text-align:center;color:#374151;font-size:11px;margin-top:24px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.loading{animation:pulse 2s infinite}
+</style>
+</head>
+<body>
+<h1>Thunder-MT</h1>
+<div class="subtitle">Stats Dashboard <span id="clock" class="loading"></span></div>
+<div class="grid">
+<div class="card"><div class="card-label">Streams</div><div class="card-value blue" id="v-streams">-</div></div>
+<div class="card"><div class="card-label">Lavf / ffprobe</div><div class="card-value yellow" id="v-lavf">-</div></div>
+<div class="card"><div class="card-label">Success Rate</div><div class="card-value green" id="v-rate">-</div></div>
+<div class="card"><div class="card-label">Cache Hits</div><div class="card-value blue" id="v-cache">-</div></div>
+<div class="card"><div class="card-label">Traffic</div><div class="card-value" id="v-bytes">-</div></div>
+<div class="card"><div class="card-label">Errors</div><div class="card-value red" id="v-errors">-</div></div>
+<div class="card"><div class="card-label">Active</div><div class="card-value green" id="v-active">-</div></div>
+<div class="card"><div class="card-label">Avg Latency</div><div class="card-value" id="v-latency">-</div></div>
+</div>
+<div class="chart-card">
+<div class="chart-header">
+<span class="chart-title">Traffic (Bytes)</span>
+<div class="btn-group">
+<button class="btn active" data-range="1h">1H</button>
+<button class="btn" data-range="6h">6H</button>
+<button class="btn" data-range="24h">24H</button>
+<button class="btn" data-range="7d">7D</button>
+<button class="btn" data-range="15d">15D</button>
+<button class="btn" data-range="30d">30D</button>
+</div>
+</div>
+<canvas id="chart"></canvas>
+</div>
+<div class="table-card">
+<table>
+<thead><tr><th>Time</th><th>UA</th><th>Range</th><th>Bytes</th><th>Latency</th><th>Status</th></tr></thead>
+<tbody id="log-body"><tr><td colspan="6" class="empty">No data yet</td></tr></tbody>
+</table>
+</div>
+<div class="footer">Thunder-MT Proxy &middot; auto-refresh every 10s</div>
+<script>
+function humanizeBytes(b){
+if(b===undefined||b===null)return'0 B';
+if(b<1024)return b+' B';
+var kb=b/1024;
+if(kb<1024)return kb.toFixed(1)+' KB';
+var mb=kb/1024;
+if(mb<1024)return mb.toFixed(1)+' MB';
+var gb=mb/1024;
+return gb.toFixed(2)+' GB';
+}
+function humanizeMs(ms){
+if(ms===undefined||ms===null)return'0ms';
+if(ms<1000)return ms+'ms';
+return(ms/1000).toFixed(1)+'s';
+}
+function fmtPct(v){
+if(v===undefined||v===null)return'-';
+return v.toFixed(1)+'%';
+}
+var chartRange='1h';
+var chartData=null;
+var canvas=document.getElementById('chart');
+var ctx=canvas.getContext('2d');
+function drawChart(){
+if(!canvas||!ctx)return;
+var dpr=window.devicePixelRatio||1;
+var rect=canvas.getBoundingClientRect();
+canvas.width=rect.width*dpr;
+canvas.height=rect.height*dpr;
+ctx.setTransform(dpr,0,0,dpr,0,0);
+var w=rect.width;
+var h=rect.height;
+ctx.clearRect(0,0,w,h);
+var datasets=[];
+var labels=[];
+if(chartRange==='1h'||chartRange==='6h'||chartRange==='24h'){
+var hours=chartRange==='1h'?1:chartRange==='6h'?6:24;
+var now=new Date().getHours();
+for(var i=hours-1;i>=0;i--){
+var hr=(now-i+24)%24;
+labels.push(hr+':00');
+}
+if(chartData&&chartData.hourly){
+for(var j=0;j<hours;j++){
+var idx=(now-j+24)%24;
+var bk=chartData.hourly[idx]||{b:0};
+datasets.push(bk.b);
+}
+datasets.reverse();
+}
+}else{
+var days=chartRange==='7d'?7:chartRange==='15d'?15:30;
+if(chartData&&chartData.daily){
+var dl=chartData.daily.slice(0,days).reverse();
+for(var k=0;k<dl.length;k++){
+labels.push(dl[k].date.slice(5));
+datasets.push(dl[k].bytes||0);
+}
+}else{
+for(var d=0;d<Math.min(days,30);d++){labels.push('--');datasets.push(0);}
+}
+}
+if(datasets.length===0){ctx.fillStyle='#4b5563';ctx.font='14px sans-serif';ctx.textAlign='center';ctx.fillText('No data',w/2,h/2);return}
+var maxVal=Math.max.apply(null,datasets);
+if(maxVal===0)maxVal=1;
+var padding={top:10,right:16,bottom:32,left:58};
+var pw=w-padding.left-padding.right;
+var ph=h-padding.top-padding.bottom;
+ctx.strokeStyle='rgba(255,255,255,0.06)';
+ctx.lineWidth=1;
+for(var i=0;i<=4;i++){
+var y=padding.top+(ph/4)*i;
+ctx.beginPath();
+ctx.moveTo(padding.left,y);
+ctx.lineTo(w-padding.right,y);
+ctx.stroke();
+var lbl=i===0?humanizeBytes(maxVal):humanizeBytes(maxVal*(1-i/4));
+ctx.fillStyle='#4b5563';
+ctx.font='10px sans-serif';
+ctx.textAlign='right';
+ctx.fillText(lbl,padding.left-6,y+4);
+}
+var gradient=ctx.createLinearGradient(0,padding.top,0,h-padding.bottom);
+gradient.addColorStop(0,'rgba(139,92,246,0.25)');
+gradient.addColorStop(1,'rgba(96,165,250,0.05)');
+ctx.beginPath();
+var barWidth=pw/datasets.length*.6;
+var gap=pw/datasets.length*.4;
+datasets.forEach(function(v,i){
+var barH=(v/maxVal)*ph;
+var x=padding.left+i*(barWidth+gap)+gap/2;
+var y=h-padding.bottom-barH;
+ctx.fillStyle=gradient;
+ctx.fillRect(x,y,barWidth,barH);
+ctx.fillStyle='#6b7280';
+ctx.font='10px sans-serif';
+ctx.textAlign='center';
+var showLabel=(chartRange==='24h'&&labels.length>12)?(i%4===0):(chartRange==='7d'||chartRange==='15d'||chartRange==='30d')?(i%Math.ceil(labels.length/8)===0):true;
+if(showLabel)ctx.fillText(labels[i],x+barWidth/2,h-padding.bottom+16);
+});
+}
+function updateClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString();document.getElementById('clock').classList.remove('loading');}
+function renderTable(logs){
+var tbody=document.getElementById('log-body');
+if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="6" class="empty">No data yet</td></tr>';return}
+var shown=logs.slice(0,10);
+var cls={'200':'status-200','302':'status-302','500':'status-500'};
+tbody.innerHTML=shown.map(function(l){
+var sc=cls[l.status]||'';
+var errBadge=l.error?' <span class="badge badge-err">'+l.error.substring(0,30)+'</span>':'';
+return'<tr><td>'+l.time+'</td><td>'+l.ua+'</td><td>'+l.range+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td class="'+sc+'">'+l.status+'</td></tr>';
+}).join('');
+}
+function refresh(){
+fetch('/api/stats').then(function(r){return r.json();}).then(function(d){
+chartData=d;
+document.getElementById('v-streams').textContent=d.streams||0;
+document.getElementById('v-lavf').textContent=d.lavf||0;
+document.getElementById('v-rate').textContent=fmtPct(d.successRate);
+document.getElementById('v-cache').textContent=d.cacheHits||0;
+document.getElementById('v-bytes').textContent=humanizeBytes(d.totalBytes);
+document.getElementById('v-errors').textContent=d.errors||0;
+document.getElementById('v-active').textContent=d.active||0;
+document.getElementById('v-latency').textContent=humanizeMs(d.avgLatency);
+renderTable(d.logs);
+drawChart();
+updateClock();
+}).catch(function(){});
+}
+document.querySelectorAll('.btn').forEach(function(b){
+b.addEventListener('click',function(){
+document.querySelectorAll('.btn').forEach(function(x){x.classList.remove('active');});
+b.classList.add('active');
+chartRange=b.dataset.range;
+drawChart();
+});
+});
+refresh();
+setInterval(refresh,10000);
+window.addEventListener('resize',drawChart);
+</script>
+</body>
+</html>`
+
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(dashboardHTML))
+}
+
+func (s *server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"service":"Thunder-MT","version":"%s"}`, version)
+	json.NewEncoder(w).Encode(stats.snapshot())
 }
 
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
+	start := stats.recordStart()
+	wr := &responseWriter{ResponseWriter: w}
+
 	backendURL := r.URL.Query().Get("url")
 	if backendURL == "" {
-		http.Error(w, "Missing 'url' parameter", http.StatusBadRequest)
+		http.Error(wr, "Missing 'url' parameter", http.StatusBadRequest)
+		stats.recordEnd(start, r.Header.Get("User-Agent"), "", 0, false, fmt.Errorf("missing url"))
 		return
 	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Lavf") {
 		log.Printf("Lavf 302 → %s", backendURL)
-		http.Redirect(w, r, backendURL, http.StatusFound)
+		http.Redirect(wr, r, backendURL, http.StatusFound)
+		stats.recordEnd(start, r.Header.Get("User-Agent"), "", 0, true, nil)
 		return
 	}
 
@@ -444,7 +953,8 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		log.Printf("解析直链失败: %v", err)
-		http.Error(w, "无法解析后端地址", http.StatusBadGateway)
+		http.Error(wr, "无法解析后端地址", http.StatusBadGateway)
+		stats.recordEnd(start, r.Header.Get("User-Agent"), rangeHeader, 0, false, err)
 		return
 	}
 
@@ -452,27 +962,30 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	rangeHeader := r.Header.Get("Range")
 
 	disposition := fmt.Sprintf(`inline; filename="%s"`, proxy.fileName)
-	w.Header().Set("Content-Type", proxy.contentType)
-	w.Header().Set("Content-Disposition", disposition)
-	w.Header().Set("Accept-Ranges", "bytes")
+	wr.Header().Set("Content-Type", proxy.contentType)
+	wr.Header().Set("Content-Disposition", disposition)
+	wr.Header().Set("Accept-Ranges", "bytes")
 
 	if rangeHeader == "" {
 		log.Printf("无 Range: 连续流 0→%d, trunk=%d", size, proxy.trunk)
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		w.WriteHeader(http.StatusOK)
+		wr.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		wr.WriteHeader(http.StatusOK)
 
-		if f, ok := w.(http.Flusher); ok {
+		if f, ok := wr.(http.Flusher); ok {
 			f.Flush()
 		}
-		if err := proxy.continuousStream(0, w); err != nil {
-			log.Printf("连续流错误: %v", err)
+		streamErr := proxy.continuousStream(0, wr)
+		if streamErr != nil {
+			log.Printf("连续流错误: %v", streamErr)
 		}
+		stats.recordEnd(start, r.Header.Get("User-Agent"), "", wr.bytes, false, streamErr)
 		return
 	}
 
 	m := rangeRe.FindStringSubmatch(rangeHeader)
 	if m == nil {
-		http.Error(w, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+		http.Error(wr, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+		stats.recordEnd(start, r.Header.Get("User-Agent"), rangeHeader, 0, false, fmt.Errorf("invalid range"))
 		return
 	}
 
@@ -480,8 +993,9 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	endStr := m[2]
 
 	if begin >= size {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-		http.Error(w, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		wr.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+		http.Error(wr, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		stats.recordEnd(start, r.Header.Get("User-Agent"), rangeHeader, 0, false, fmt.Errorf("range not satisfiable"))
 		return
 	}
 
@@ -496,29 +1010,33 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		length := end - begin + 1
 		log.Printf("Range(B): %s → begin=%d end=%d length=%d", rangeHeader, begin, end, length)
 
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, size))
-		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-		w.WriteHeader(http.StatusPartialContent)
+		wr.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, size))
+		wr.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		wr.WriteHeader(http.StatusPartialContent)
 
-		if f, ok := w.(http.Flusher); ok {
+		if f, ok := wr.(http.Flusher); ok {
 			f.Flush()
 		}
-		if err := proxy.sortedStream(begin, end, w); err != nil {
-			log.Printf("sortedStream 错误: %v", err)
+		streamErr := proxy.sortedStream(begin, end, wr)
+		if streamErr != nil {
+			log.Printf("sortedStream 错误: %v", streamErr)
 		}
+		stats.recordEnd(start, r.Header.Get("User-Agent"), rangeHeader, wr.bytes, false, streamErr)
 	} else {
 		log.Printf("Range(U): %s 连续流 %d→%d", rangeHeader, begin, size)
 
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, size-1, size))
-		w.Header().Set("Content-Length", strconv.FormatInt(size-begin, 10))
-		w.WriteHeader(http.StatusPartialContent)
+		wr.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, size-1, size))
+		wr.Header().Set("Content-Length", strconv.FormatInt(size-begin, 10))
+		wr.WriteHeader(http.StatusPartialContent)
 
-		if f, ok := w.(http.Flusher); ok {
+		if f, ok := wr.(http.Flusher); ok {
 			f.Flush()
 		}
-		if err := proxy.continuousStream(begin, w); err != nil {
-			log.Printf("连续流错误: %v", err)
+		streamErr := proxy.continuousStream(begin, wr)
+		if streamErr != nil {
+			log.Printf("连续流错误: %v", streamErr)
 		}
+		stats.recordEnd(start, r.Header.Get("User-Agent"), rangeHeader, wr.bytes, false, streamErr)
 	}
 }
 
@@ -565,9 +1083,20 @@ func main() {
 
 	srv := newServer(trunk, split, conns, headers)
 
+	os.MkdirAll("/data", 0755)
+	stats.load("/data/stats.json")
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			stats.save("/data/stats.json")
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/stream", srv.handleStream)
+	mux.HandleFunc("/api/stats", srv.handleAPIStats)
 	mux.HandleFunc("/", srv.handleRoot)
 
 	addr := fmt.Sprintf("%s:%s", host, port)
