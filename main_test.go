@@ -49,6 +49,32 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
+func TestNewServerFirstChunk(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"", 2 * 1024 * 1024},      // 默认 2M
+		{"1M", 1024 * 1024},
+		{"512K", 512 * 1024},
+		{"3M", 3 * 1024 * 1024},
+	}
+	for _, c := range cases {
+		s := newServer("10M", "1M", c.in, 3, nil)
+		if s.firstChunk != c.want {
+			t.Errorf("newServer firstChunk=%q -> %d, want %d", c.in, s.firstChunk, c.want)
+		}
+	}
+	// trunk/split 不受影响
+	s := newServer("120M", "3M", "2M", 3, nil)
+	if s.trunk != 120*1024*1024 {
+		t.Errorf("trunk 应为 120M, 实得 %d", s.trunk)
+	}
+	if s.split != 3*1024*1024 {
+		t.Errorf("split 应为 3M, 实得 %d", s.split)
+	}
+}
+
 func TestIsURLAllowed(t *testing.T) {
 	// 无白名单时：仅协议+host 校验
 	allowedHosts = nil

@@ -812,11 +812,12 @@ func (s *statsCollector) load(path string) {
 }
 
 type server struct {
-	trunk   int64
-	split   int64
-	conns   int
-	headers map[string]string
-	cache   *proxyCache
+	trunk      int64
+	split      int64
+	firstChunk int64
+	conns      int
+	headers    map[string]string
+	cache      *proxyCache
 }
 
 func isFatal(err error) bool {
@@ -857,14 +858,19 @@ func (s *server) checkAuth(r *http.Request) bool {
 	return false
 }
 
-func newServer(trunk, split string, conns int, headers map[string]string) *server {
+func newServer(trunk, split, firstChunk string, conns int, headers map[string]string) *server {
 	cacheTTL := 300 * time.Second
+	fc := parseSize(firstChunk)
+	if fc <= 0 {
+		fc = 2 * 1024 * 1024
+	}
 	return &server{
-		trunk:   parseSize(trunk),
-		split:   parseSize(split),
-		conns:   conns,
-		headers: headers,
-		cache:   newProxyCache(cacheTTL),
+		trunk:      parseSize(trunk),
+		split:      parseSize(split),
+		firstChunk: fc,
+		conns:      conns,
+		headers:    headers,
+		cache:      newProxyCache(cacheTTL),
 	}
 }
 
@@ -1192,11 +1198,11 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	var streamErr error
 
 	if rangeHeader == "" {
-		firstEnd := proxy.split - 1
+		firstEnd := s.firstChunk - 1
 		if firstEnd >= size {
 			firstEnd = size - 1
 		}
-		log.Printf("无 Range: 首 chunk 0→%d, size=%d", firstEnd, size)
+		log.Printf("无 Range: 首 chunk 0→%d (firstChunk=%d), size=%d", firstEnd, s.firstChunk, size)
 		flushHeaders(wr, fmt.Sprintf("bytes 0-%d/%d", firstEnd, size), firstEnd+1)
 		streamErr = proxy.sortedStream(0, firstEnd, wr)
 		logIfFatal(streamErr, "连续流错误: %v", streamErr)
@@ -1252,6 +1258,10 @@ func main() {
 	if split == "" {
 		split = "1M"
 	}
+	firstChunk := os.Getenv("FIRST_CHUNK")
+	if firstChunk == "" {
+		firstChunk = "2M"
+	}
 	connsStr := os.Getenv("CONNS")
 	conns := 60
 	if connsStr != "" {
@@ -1276,7 +1286,7 @@ func main() {
 	initAllowedHosts()
 	dashboardToken = strings.TrimSpace(os.Getenv("DASHBOARD_TOKEN"))
 
-	srv := newServer(trunk, split, conns, headers)
+	srv := newServer(trunk, split, firstChunk, conns, headers)
 
 	os.MkdirAll("/data", 0755)
 	stats.load("/data/stats.json")
@@ -1296,7 +1306,7 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("Thunder-MT v%s 启动，监听 %s", version, addr)
-	log.Printf("配置: trunk=%s split=%s conns=%d", trunk, split, conns)
+	log.Printf("配置: trunk=%s split=%s firstChunk=%s conns=%d", trunk, split, firstChunk, conns)
 	if allowedHosts != nil {
 		log.Printf("ALLOW_HOSTS 白名单: %d 个 host", len(allowedHosts))
 	}

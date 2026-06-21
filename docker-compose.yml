@@ -8,10 +8,12 @@ services:
       - TZ=Asia/Shanghai
       - TRUNK=120M       # 单次 Range 返回量 / 缓冲窗口
       - SPLIT=3M         # 并行下载分块大小
+      - FIRST_CHUNK=2M   # 无 Range 请求首块大小(起播速度),1-2M 为甜点
       - CONNS=3          # 并行 goroutine 数
       - HOST=0.0.0.0
       - PORT=8010
       - HEADERS={}       # 请求直链时附加的 HTTP 头，JSON 格式
+      - ALLOW_HOSTS=127.0.0.1  # 允许代理的目标 host 白名单(逗号分隔),留空则不限
     volumes:
       - ./data:/data
     restart: unless-stopped
