@@ -560,8 +560,9 @@ func (s *statsCollector) snapshot() map[string]interface{} {
 	defer s.mu.Unlock()
 	total := s.TotalStreams + s.TotalLavf
 	successRate := 0.0
-	if s.TotalStreams > 0 {
-		successRate = float64(s.TotalSuccess) / float64(s.TotalStreams) * 100
+	realStreams := s.TotalStreams - s.TotalLavf
+	if realStreams > 0 {
+		successRate = float64(s.TotalSuccess) / float64(realStreams) * 100
 	}
 	avgLatency := int64(0)
 	if total > 0 {
