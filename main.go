@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var version = "1.0.9"
+var version = "1.1.0"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameStarRe = regexp.MustCompile(`filename\*\s*=\s*UTF-8''(.+)`)
 var filenamePlainRe = regexp.MustCompile(`filename\s*=\s*"?([^";]+)"?`)
@@ -105,6 +105,16 @@ func parseSize(s string) int64 {
 	return v * multiplier
 }
 
+// setHeaders 设置 Range 和自定义 headers 到请求, 统一 3 处重复样板
+func setHeaders(req *http.Request, headers map[string]string, rangeVal string) {
+	if rangeVal != "" {
+		req.Header.Set("Range", rangeVal)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+}
+
 func extractFileName(rawURL, contentDisposition string) string {
 	if contentDisposition != "" {
 		if m := filenameStarRe.FindStringSubmatch(contentDisposition); m != nil {
@@ -156,10 +166,7 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Range", "bytes=0-0")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	setHeaders(req, headers, "bytes=0-0")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -213,10 +220,7 @@ func (p *urlProxy) downloadChunk(ctx context.Context, begin, end int64) ([]byte,
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", begin, end))
-		for k, v := range p.headers {
-			req.Header.Set(k, v)
-		}
+		setHeaders(req, p.headers, fmt.Sprintf("bytes=%d-%d", begin, end))
 
 		resp, err := p.client.Do(req)
 		if err != nil {
@@ -422,9 +426,8 @@ func (pc *proxyCache) get(key string) *urlProxy {
 		return nil
 	}
 	pc.mu.Lock()
-	entry.lastAccess = time.Now()
+	pc.touchAndHit(entry)
 	pc.mu.Unlock()
-	stats.recordCacheHit()
 	return entry.proxy
 }
 
@@ -434,6 +437,12 @@ func (pc *proxyCache) set(key string, proxy *urlProxy) {
 	pc.mu.Unlock()
 }
 
+// touchAndHit 更新 lastAccess + 记 cache hit, 调用者必须持有 pc.mu 写锁
+func (pc *proxyCache) touchAndHit(entry *cachedProxy) {
+	entry.lastAccess = time.Now()
+	stats.recordCacheHit()
+}
+
 func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) (*urlProxy, error) {
 	if p := pc.get(key); p != nil {
 		return p, nil
@@ -441,9 +450,8 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 
 	pc.mu.Lock()
 	if entry, ok := pc.items[key]; ok {
+		pc.touchAndHit(entry)
 		pc.mu.Unlock()
-		entry.lastAccess = time.Now()
-		stats.recordCacheHit()
 		return entry.proxy, nil
 	}
 	if c, ok := pc.inflight[key]; ok {
@@ -468,7 +476,7 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 	if err == nil {
 		if existing, ok := pc.items[key]; ok {
 			proxy.client.CloseIdleConnections()
-			existing.lastAccess = time.Now()
+			pc.touchAndHit(existing)
 			c.val = existing.proxy
 		} else {
 			pc.items[key] = &cachedProxy{lastAccess: time.Now(), proxy: proxy}
@@ -498,10 +506,7 @@ func resolveDirectURL(backendURL string, headers map[string]string) (string, err
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Range", "bytes=0-0")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
+	setHeaders(req, headers, "bytes=0-0")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -538,6 +543,24 @@ type logEntry struct {
 	TransferTime int64  `json:"transferTime,omitempty"`
 	Status       int    `json:"status"`
 	Error        string `json:"error,omitempty"`
+}
+
+type statsSnapshot struct {
+	Date              string           `json:"date"`
+	Streams           int64            `json:"streams"`
+	Lavf              int64            `json:"lavf"`
+	SuccessRate       float64          `json:"successRate"`
+	TotalBytes        int64            `json:"totalBytes"`
+	TotalLatency      int64            `json:"totalLatency"`
+	TotalTransferTime int64            `json:"totalTransferTime"`
+	Errors            int64            `json:"errors"`
+	AvgLatency        int64            `json:"avgLatency"`
+	AvgTransferTime   int64            `json:"avgTransferTime"`
+	CacheHits         int64            `json:"cacheHits"`
+	Active            int32            `json:"active"`
+	Hourly            [24]hourlyBucket `json:"hourly"`
+	Daily             []dailyRecord    `json:"daily"`
+	Logs              []logEntry       `json:"logs"`
 }
 
 type statsCollector struct {
@@ -654,61 +677,56 @@ func (s *statsCollector) checkDate() {
 }
 
 func shortUA(ua string) string {
-	if strings.Contains(ua, "Lavf") {
+	switch {
+	case strings.Contains(ua, "Lavf"):
 		return "ffprobe"
-	}
-	if strings.Contains(ua, "libmpv") {
+	case strings.Contains(ua, "libmpv"):
 		return "mpv"
-	}
-	if strings.Contains(ua, "Infuse") {
+	case strings.Contains(ua, "Infuse"):
 		return "Infuse"
-	}
-	if ua == "" {
+	case ua == "":
 		return "-"
-	}
-	if len(ua) > 30 {
+	case len(ua) > 30:
 		return ua[:30]
+	default:
+		return ua
 	}
-	return ua
 }
 
-func (s *statsCollector) snapshot() map[string]interface{} {
+func (s *statsCollector) snapshot() statsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	total := s.TotalStreams
-	successRate := 0.0
 	realStreams := s.TotalStreams - s.TotalLavf
+	successRate := 0.0
 	if realStreams > 0 {
 		successRate = float64(s.TotalSuccess) / float64(realStreams) * 100
 	}
 	avgLatency := int64(0)
 	avgTransferTime := int64(0)
-	if total > 0 {
-		avgLatency = s.TotalLatency / total
-		avgTransferTime = s.TotalTransferTime / total
+	if s.TotalStreams > 0 {
+		avgLatency = s.TotalLatency / s.TotalStreams
+		avgTransferTime = s.TotalTransferTime / s.TotalStreams
 	}
-	hourlyCopy := make([]hourlyBucket, 24)
-	copy(hourlyCopy, s.Hourly[:])
 	logsCopy := make([]logEntry, len(s.Logs))
 	copy(logsCopy, s.Logs)
 	dailyCopy := make([]dailyRecord, len(s.Daily))
 	copy(dailyCopy, s.Daily)
-	return map[string]interface{}{
-		"date":              s.Date,
-		"streams":           s.TotalStreams,
-		"lavf":              s.TotalLavf,
-		"successRate":       successRate,
-		"totalBytes":        s.TotalBytes,
-		"totalLatency":      s.TotalLatency,
-		"totalTransferTime": s.TotalTransferTime,
-		"errors":            s.TotalErrors,
-		"avgLatency":        avgLatency,
-		"avgTransferTime":   avgTransferTime,
-		"cacheHits":         s.CacheHits,
-		"active":            s.ActiveStreams,
-		"hourly":            hourlyCopy,
-		"daily":             dailyCopy,
-		"logs":              logsCopy,
+	return statsSnapshot{
+		Date:              s.Date,
+		Streams:           s.TotalStreams,
+		Lavf:              s.TotalLavf,
+		SuccessRate:       successRate,
+		TotalBytes:        s.TotalBytes,
+		TotalLatency:      s.TotalLatency,
+		TotalTransferTime: s.TotalTransferTime,
+		Errors:            s.TotalErrors,
+		AvgLatency:        avgLatency,
+		AvgTransferTime:   avgTransferTime,
+		CacheHits:         s.CacheHits,
+		Active:            s.ActiveStreams,
+		Hourly:            s.Hourly, // [24]数组是值类型,赋值即深拷贝
+		Daily:             dailyCopy,
+		Logs:              logsCopy,
 	}
 }
 
@@ -723,128 +741,42 @@ func (s *statsCollector) load(path string) {
 	if err != nil {
 		return
 	}
-	var snap map[string]interface{}
+	var snap statsSnapshot
 	if json.Unmarshal(data, &snap) != nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v, ok := snap["date"].(string); ok {
-		if v == time.Now().Format("2006-01-02") {
-			s.Date = v
-			if n, ok := snap["streams"].(float64); ok {
-				s.TotalStreams = int64(n)
-			}
-			if n, ok := snap["lavf"].(float64); ok {
-				s.TotalLavf = int64(n)
-			}
-			if n, ok := snap["errors"].(float64); ok {
-				s.TotalErrors = int64(n)
-			}
-			if n, ok := snap["totalBytes"].(float64); ok {
-				s.TotalBytes = int64(n)
-			}
-			if n, ok := snap["cacheHits"].(float64); ok {
-				s.CacheHits = int64(n)
-			}
-			if n, ok := snap["totalLatency"].(float64); ok {
-				s.TotalLatency = int64(n)
-			}
-			// TTFB 迁移: 旧版本(v<=1.0.7)的 totalLatency 实为传输时长,不是 TTFB
-			// 新版本若提供 totalTransferTime, 优先用; 否则把旧 totalLatency 当 transferTime, TTFB 重置
-			if n, ok := snap["totalTransferTime"].(float64); ok {
-				s.TotalTransferTime = int64(n)
-			} else {
-				s.TotalTransferTime = s.TotalLatency
-				s.TotalLatency = 0
-			}
-			if n, ok := snap["successRate"].(float64); ok {
-				s.TotalSuccess = int64(float64(s.TotalStreams) * n / 100)
-			}
-		}
+	// 只恢复今天的数据; 跨天则从空白开始(历史已在 Daily 里)
+	if snap.Date != time.Now().Format("2006-01-02") {
+		// 仍恢复 Daily 历史(跨天看趋势)
+		s.Daily = snap.Daily
+		return
 	}
-	if daily, ok := snap["daily"].([]interface{}); ok {
-		for _, d := range daily {
-			if dm, ok := d.(map[string]interface{}); ok {
-				dr := dailyRecord{}
-				if date, ok := dm["date"].(string); ok {
-					dr.Date = date
-				}
-				if b, ok := dm["bytes"].(float64); ok {
-					dr.Bytes = int64(b)
-				}
-				if ss, ok := dm["streams"].(float64); ok {
-					dr.Streams = int64(ss)
-				}
-				if l, ok := dm["lavf"].(float64); ok {
-					dr.Lavf = int64(l)
-				}
-				if e, ok := dm["errors"].(float64); ok {
-					dr.Errors = int64(e)
-				}
-				s.Daily = append(s.Daily, dr)
-			}
-		}
+	s.Date = snap.Date
+	s.TotalStreams = snap.Streams
+	s.TotalLavf = snap.Lavf
+	s.TotalErrors = snap.Errors
+	s.TotalBytes = snap.TotalBytes
+	s.CacheHits = snap.CacheHits
+	s.TotalLatency = snap.TotalLatency
+	// TTFB 迁移: 旧版本(v<=1.0.7)的 totalLatency 实为传输时长,不是 TTFB
+	// 新版本若提供 totalTransferTime, 优先用; 否则把旧 totalLatency 当 transferTime, TTFB 重置
+	if snap.TotalTransferTime > 0 {
+		s.TotalTransferTime = snap.TotalTransferTime
+	} else {
+		s.TotalTransferTime = snap.TotalLatency
+		s.TotalLatency = 0
 	}
-	if logs, ok := snap["logs"].([]interface{}); ok {
-		for _, l := range logs {
-			if lm, ok := l.(map[string]interface{}); ok {
-				le := logEntry{}
-				if t, ok := lm["time"].(string); ok {
-					le.Time = t
-				}
-				if u, ok := lm["ua"].(string); ok {
-					le.UA = u
-				}
-				if r, ok := lm["range"].(string); ok {
-					le.Range = r
-				}
-				if b, ok := lm["bytes"].(float64); ok {
-					le.Bytes = int64(b)
-				}
-				if lat, ok := lm["latency"].(float64); ok {
-					le.Latency = int64(lat)
-				}
-				if tt, ok := lm["transferTime"].(float64); ok {
-					le.TransferTime = int64(tt)
-				} else if lat, ok := lm["latency"].(float64); ok {
-					// 旧版本 log 无 transferTime, 用 latency(实为传输时长)兜底
-					le.TransferTime = int64(lat)
-				}
-				if st, ok := lm["status"].(float64); ok {
-					le.Status = int(st)
-				}
-				if ep, ok := lm["error"].(string); ok {
-					le.Error = ep
-				}
-				s.Logs = append(s.Logs, le)
-			}
-		}
+	if snap.SuccessRate > 0 {
+		s.TotalSuccess = int64(float64(s.TotalStreams) * snap.SuccessRate / 100)
 	}
+	s.Daily = snap.Daily
+	s.Logs = snap.Logs
 	if len(s.Logs) > s.LogMax {
 		s.Logs = s.Logs[:s.LogMax]
 	}
-	if hourly, ok := snap["hourly"].([]interface{}); ok {
-		for i, h := range hourly {
-			if i >= 24 {
-				break
-			}
-			if hm, ok := h.(map[string]interface{}); ok {
-				if b, ok := hm["bytes"].(float64); ok {
-					s.Hourly[i].Bytes = int64(b)
-				}
-				if ss, ok := hm["streams"].(float64); ok {
-					s.Hourly[i].Streams = int64(ss)
-				}
-				if l, ok := hm["lavf"].(float64); ok {
-					s.Hourly[i].Lavf = int64(l)
-				}
-				if e, ok := hm["errors"].(float64); ok {
-					s.Hourly[i].Errors = int64(e)
-				}
-			}
-		}
-	}
+	s.Hourly = snap.Hourly
 }
 
 type server struct {
@@ -1240,7 +1172,14 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	wr.Header().Set("Content-Disposition", disposition)
 	wr.Header().Set("Accept-Ranges", "bytes")
 
-	var streamErr error
+	// streamSortedAndRecord: 封装 sortedStream 分支的 flush+stream+log+record 样板
+	streamSortedAndRecord := func(begin, end int64, logPrefix string) {
+		length := end - begin + 1
+		flushHeaders(wr, fmt.Sprintf("bytes %d-%d/%d", begin, end, size), length)
+		streamErr := proxy.sortedStream(begin, end, wr)
+		logIfFatal(streamErr, logPrefix+": %v", streamErr)
+		stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
+	}
 
 	if rangeHeader == "" {
 		firstEnd := s.firstChunk - 1
@@ -1248,10 +1187,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 			firstEnd = size - 1
 		}
 		log.Printf("无 Range: 首 chunk 0→%d (firstChunk=%d), size=%d", firstEnd, s.firstChunk, size)
-		flushHeaders(wr, fmt.Sprintf("bytes 0-%d/%d", firstEnd, size), firstEnd+1)
-		streamErr = proxy.sortedStream(0, firstEnd, wr)
-		logIfFatal(streamErr, "连续流错误: %v", streamErr)
-		stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
+		streamSortedAndRecord(0, firstEnd, "连续流错误")
 		return
 	}
 
@@ -1278,18 +1214,15 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if end >= size {
 			end = size - 1
 		}
-		length := end - begin + 1
-		log.Printf("Range(B): %s → begin=%d end=%d length=%d", rangeHeader, begin, end, length)
-		flushHeaders(wr, fmt.Sprintf("bytes %d-%d/%d", begin, end, size), length)
-		streamErr = proxy.sortedStream(begin, end, wr)
-		logIfFatal(streamErr, "sortedStream 错误: %v", streamErr)
+		log.Printf("Range(B): %s → begin=%d end=%d length=%d", rangeHeader, begin, end, end-begin+1)
+		streamSortedAndRecord(begin, end, "sortedStream 错误")
 	} else {
 		log.Printf("Range(U): %s 连续流 %d→%d", rangeHeader, begin, size)
 		flushHeaders(wr, fmt.Sprintf("bytes %d-%d/%d", begin, size-1, size), size-begin)
-		streamErr = proxy.continuousStream(begin, wr)
+		streamErr := proxy.continuousStream(begin, wr)
 		logIfFatal(streamErr, "连续流错误: %v", streamErr)
+		stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
 	}
-	stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
 }
 
 func main() {

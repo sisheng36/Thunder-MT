@@ -93,8 +93,8 @@ func TestRecordEndTTFB(t *testing.T) {
 	stats.recordEnd(start, wr, "test", "bytes=0-", 1024, false, nil)
 
 	snap := stats.snapshot()
-	avgLat := snap["avgLatency"].(int64)
-	avgTr := snap["avgTransferTime"].(int64)
+	avgLat := snap.AvgLatency
+	avgTr := snap.AvgTransferTime
 	if avgLat < 5 || avgLat > 25 {
 		t.Errorf("TTFB latency 应 ~10ms, 实得 %d", avgLat)
 	}
@@ -113,8 +113,8 @@ func TestRecordEndTTFB(t *testing.T) {
 	stats.recordEnd(start2, wr2, "test", "", 0, false, fmt.Errorf("read error"))
 
 	snap2 := stats.snapshot()
-	avgLat2 := snap2["avgLatency"].(int64)
-	avgTr2 := snap2["avgTransferTime"].(int64)
+	avgLat2 := snap2.AvgLatency
+	avgTr2 := snap2.AvgTransferTime
 	if avgLat2 != avgTr2 {
 		t.Errorf("无首字节时 latency(%d) 应 = transferTime(%d)", avgLat2, avgTr2)
 	}
