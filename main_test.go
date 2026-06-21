@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"testing"
+	"time"
+)
 
 func TestParseSize(t *testing.T) {
 	cases := []struct {
@@ -72,6 +77,68 @@ func TestNewServerFirstChunk(t *testing.T) {
 	}
 	if s.split != 3*1024*1024 {
 		t.Errorf("split 应为 3M, 实得 %d", s.split)
+	}
+}
+
+func TestRecordEndTTFB(t *testing.T) {
+	// 重置 stats
+	stats = &statsCollector{LogMax: 50, Date: time.Now().Format("2006-01-02"), Daily: []dailyRecord{}, Logs: []logEntry{}}
+
+	// 场景1: 有首字节 → latency=TTFB, transferTime=总时长
+	start := time.Now()
+	wr := &responseWriter{start: start}
+	time.Sleep(10 * time.Millisecond)
+	wr.firstByteAt = time.Now() // 模拟首字节
+	time.Sleep(20 * time.Millisecond) // 模拟后续传输
+	stats.recordEnd(start, wr, "test", "bytes=0-", 1024, false, nil)
+
+	snap := stats.snapshot()
+	avgLat := snap["avgLatency"].(int64)
+	avgTr := snap["avgTransferTime"].(int64)
+	if avgLat < 5 || avgLat > 25 {
+		t.Errorf("TTFB latency 应 ~10ms, 实得 %d", avgLat)
+	}
+	if avgTr < 25 || avgTr > 50 {
+		t.Errorf("transferTime 应 ~30ms, 实得 %d", avgTr)
+	}
+	if avgLat >= avgTr {
+		t.Errorf("TTFB(%d) 应 < transferTime(%d)", avgLat, avgTr)
+	}
+
+	// 场景2: 无首字节(0 bytes) → latency 兜底用总时长 = transferTime
+	stats = &statsCollector{LogMax: 50, Date: time.Now().Format("2006-01-02"), Daily: []dailyRecord{}, Logs: []logEntry{}}
+	start2 := time.Now()
+	wr2 := &responseWriter{start: start2} // firstByteAt 零值
+	time.Sleep(15 * time.Millisecond)
+	stats.recordEnd(start2, wr2, "test", "", 0, false, fmt.Errorf("read error"))
+
+	snap2 := stats.snapshot()
+	avgLat2 := snap2["avgLatency"].(int64)
+	avgTr2 := snap2["avgTransferTime"].(int64)
+	if avgLat2 != avgTr2 {
+		t.Errorf("无首字节时 latency(%d) 应 = transferTime(%d)", avgLat2, avgTr2)
+	}
+}
+
+func TestLoadLegacyLatencyMigration(t *testing.T) {
+	// 旧版本 stats.json: 有 totalLatency(实为传输时长), 无 totalTransferTime
+	// 加载后应把 totalLatency 迁移到 TotalTransferTime, TotalLatency 重置为 0
+	tmpDir := t.TempDir()
+	path := tmpDir + "/stats.json"
+	legacy := `{"date":"` + time.Now().Format("2006-01-02") + `","streams":10,"lavf":0,"errors":0,"totalBytes":1000,"cacheHits":5,"totalLatency":50000,"successRate":100,"daily":[],"logs":[],"hourly":[]}`
+	os.WriteFile(path, []byte(legacy), 0644)
+
+	stats = &statsCollector{LogMax: 50, Date: time.Now().Format("2006-01-02"), Daily: []dailyRecord{}, Logs: []logEntry{}}
+	stats.load(path)
+
+	if stats.TotalTransferTime != 50000 {
+		t.Errorf("旧 totalLatency 50000 应迁移到 TotalTransferTime, 实得 %d", stats.TotalTransferTime)
+	}
+	if stats.TotalLatency != 0 {
+		t.Errorf("迁移后 TotalLatency 应重置为 0(TTFB 无历史数据), 实得 %d", stats.TotalLatency)
+	}
+	if stats.TotalStreams != 10 {
+		t.Errorf("streams 应恢复 10, 实得 %d", stats.TotalStreams)
 	}
 }
 

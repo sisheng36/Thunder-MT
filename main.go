@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var version = "1.0.7"
+var version = "1.0.8"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameStarRe = regexp.MustCompile(`filename\*\s*=\s*UTF-8''(.+)`)
 var filenamePlainRe = regexp.MustCompile(`filename\s*=\s*"?([^";]+)"?`)
@@ -530,30 +530,32 @@ type dailyRecord struct {
 }
 
 type logEntry struct {
-	Time    string `json:"time"`
-	UA      string `json:"ua"`
-	Range   string `json:"range"`
-	Bytes   int64  `json:"bytes"`
-	Latency int64  `json:"latency"`
-	Status  int    `json:"status"`
-	Error   string `json:"error,omitempty"`
+	Time         string `json:"time"`
+	UA           string `json:"ua"`
+	Range        string `json:"range"`
+	Bytes        int64  `json:"bytes"`
+	Latency      int64  `json:"latency"`
+	TransferTime int64  `json:"transferTime,omitempty"`
+	Status       int    `json:"status"`
+	Error        string `json:"error,omitempty"`
 }
 
 type statsCollector struct {
-	mu            sync.Mutex
-	Date          string
-	TotalStreams  int64
-	TotalLavf     int64
-	TotalSuccess  int64
-	TotalErrors   int64
-	TotalBytes    int64
-	TotalLatency  int64
-	CacheHits     int64
-	ActiveStreams int32
-	Hourly        [24]hourlyBucket
-	Daily         []dailyRecord
-	Logs          []logEntry
-	LogMax        int
+	mu                sync.Mutex
+	Date              string
+	TotalStreams      int64
+	TotalLavf         int64
+	TotalSuccess      int64
+	TotalErrors       int64
+	TotalBytes        int64
+	TotalLatency      int64
+	TotalTransferTime int64
+	CacheHits         int64
+	ActiveStreams     int32
+	Hourly            [24]hourlyBucket
+	Daily             []dailyRecord
+	Logs              []logEntry
+	LogMax            int
 }
 
 var stats = &statsCollector{
@@ -565,14 +567,22 @@ var stats = &statsCollector{
 
 func (s *statsCollector) recordStart() time.Time { return time.Now() }
 
-func (s *statsCollector) recordEnd(start time.Time, ua, rangeStr string, bytes int64, isLavf bool, err error) {
+func (s *statsCollector) recordEnd(start time.Time, wr *responseWriter, ua, rangeStr string, bytes int64, isLavf bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkDate()
 	now := time.Now()
-	latency := now.Sub(start).Milliseconds()
+	totalDuration := now.Sub(start).Milliseconds()
+	// latency = TTFB(首字节延迟); 无首字节(0 bytes 或 Lavf 302)用 totalDuration 兜底
+	var latency int64
+	if wr != nil && wr.firstByteAt.IsZero() == false {
+		latency = wr.firstByteAt.Sub(start).Milliseconds()
+	} else {
+		latency = totalDuration
+	}
 	s.TotalStreams++
 	s.TotalLatency += latency
+	s.TotalTransferTime += totalDuration
 	s.Hourly[now.Hour()].Streams++
 	if isLavf {
 		s.TotalLavf++
@@ -587,7 +597,14 @@ func (s *statsCollector) recordEnd(start time.Time, ua, rangeStr string, bytes i
 	}
 	s.TotalBytes += bytes
 	s.Hourly[now.Hour()].Bytes += bytes
-	entry := logEntry{Time: now.Format("15:04:05"), UA: shortUA(ua), Range: rangeStr, Bytes: bytes, Latency: latency}
+	entry := logEntry{
+		Time:         now.Format("15:04:05"),
+		UA:           shortUA(ua),
+		Range:        rangeStr,
+		Bytes:        bytes,
+		Latency:      latency,
+		TransferTime: totalDuration,
+	}
 	if isFatal(err) {
 		entry.Error = err.Error()
 		entry.Status = 500
@@ -631,6 +648,7 @@ func (s *statsCollector) checkDate() {
 	s.TotalSuccess = 0
 	s.TotalErrors = 0
 	s.TotalLatency = 0
+	s.TotalTransferTime = 0
 	s.CacheHits = 0
 	s.Hourly = [24]hourlyBucket{}
 }
@@ -664,8 +682,10 @@ func (s *statsCollector) snapshot() map[string]interface{} {
 		successRate = float64(s.TotalSuccess) / float64(realStreams) * 100
 	}
 	avgLatency := int64(0)
+	avgTransferTime := int64(0)
 	if total > 0 {
 		avgLatency = s.TotalLatency / total
+		avgTransferTime = s.TotalTransferTime / total
 	}
 	hourlyCopy := make([]hourlyBucket, 24)
 	copy(hourlyCopy, s.Hourly[:])
@@ -674,19 +694,21 @@ func (s *statsCollector) snapshot() map[string]interface{} {
 	dailyCopy := make([]dailyRecord, len(s.Daily))
 	copy(dailyCopy, s.Daily)
 	return map[string]interface{}{
-		"date":         s.Date,
-		"streams":      s.TotalStreams,
-		"lavf":         s.TotalLavf,
-		"successRate":  successRate,
-		"totalBytes":   s.TotalBytes,
-		"totalLatency": s.TotalLatency,
-		"errors":       s.TotalErrors,
-		"avgLatency":   avgLatency,
-		"cacheHits":    s.CacheHits,
-		"active":       s.ActiveStreams,
-		"hourly":       hourlyCopy,
-		"daily":        dailyCopy,
-		"logs":         logsCopy,
+		"date":              s.Date,
+		"streams":           s.TotalStreams,
+		"lavf":              s.TotalLavf,
+		"successRate":       successRate,
+		"totalBytes":        s.TotalBytes,
+		"totalLatency":      s.TotalLatency,
+		"totalTransferTime": s.TotalTransferTime,
+		"errors":            s.TotalErrors,
+		"avgLatency":        avgLatency,
+		"avgTransferTime":   avgTransferTime,
+		"cacheHits":         s.CacheHits,
+		"active":            s.ActiveStreams,
+		"hourly":            hourlyCopy,
+		"daily":             dailyCopy,
+		"logs":              logsCopy,
 	}
 }
 
@@ -727,6 +749,14 @@ func (s *statsCollector) load(path string) {
 			}
 			if n, ok := snap["totalLatency"].(float64); ok {
 				s.TotalLatency = int64(n)
+			}
+			// TTFB 迁移: 旧版本(v<=1.0.7)的 totalLatency 实为传输时长,不是 TTFB
+			// 新版本若提供 totalTransferTime, 优先用; 否则把旧 totalLatency 当 transferTime, TTFB 重置
+			if n, ok := snap["totalTransferTime"].(float64); ok {
+				s.TotalTransferTime = int64(n)
+			} else {
+				s.TotalTransferTime = s.TotalLatency
+				s.TotalLatency = 0
 			}
 			if n, ok := snap["successRate"].(float64); ok {
 				s.TotalSuccess = int64(float64(s.TotalStreams) * n / 100)
@@ -774,6 +804,12 @@ func (s *statsCollector) load(path string) {
 				}
 				if lat, ok := lm["latency"].(float64); ok {
 					le.Latency = int64(lat)
+				}
+				if tt, ok := lm["transferTime"].(float64); ok {
+					le.TransferTime = int64(tt)
+				} else if lat, ok := lm["latency"].(float64); ok {
+					// 旧版本 log 无 transferTime, 用 latency(实为传输时长)兜底
+					le.TransferTime = int64(lat)
 				}
 				if st, ok := lm["status"].(float64); ok {
 					le.Status = int(st)
@@ -828,11 +864,12 @@ func isFatal(err error) bool {
 	return !strings.Contains(msg, "broken pipe") && !strings.Contains(msg, "connection reset")
 }
 
-func flushHeaders(w http.ResponseWriter, contentRange string, contentLength int64) {
-	w.Header().Set("Content-Range", contentRange)
-	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
-	w.WriteHeader(http.StatusPartialContent)
-	if f, ok := w.(http.Flusher); ok {
+func flushHeaders(wr *responseWriter, contentRange string, contentLength int64) {
+	wr.Header().Set("Content-Range", contentRange)
+	wr.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	wr.WriteHeader(http.StatusPartialContent)
+	wr.headerSentAt = time.Now()
+	if f, ok := wr.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
@@ -876,7 +913,10 @@ func newServer(trunk, split, firstChunk string, conns int, headers map[string]st
 
 type responseWriter struct {
 	http.ResponseWriter
-	wrote int64
+	wrote        int64
+	firstByteAt  time.Time
+	start        time.Time
+	headerSentAt time.Time
 }
 
 func (w *responseWriter) Write(b []byte) (n int, err error) {
@@ -885,6 +925,9 @@ func (w *responseWriter) Write(b []byte) (n int, err error) {
 			err = fmt.Errorf("write panic: %v", r)
 		}
 	}()
+	if w.firstByteAt.IsZero() {
+		w.firstByteAt = time.Now()
+	}
 	n, err = w.ResponseWriter.Write(b)
 	w.wrote += int64(n)
 	return
@@ -947,6 +990,7 @@ tr:last-child td{border-bottom:none}
 <div class="card"><div class="card-label">Errors</div><div class="card-value red" id="v-errors">-</div></div>
 <div class="card"><div class="card-label">Active</div><div class="card-value green" id="v-active">-</div></div>
 <div class="card"><div class="card-label">Avg Latency</div><div class="card-value" id="v-latency">-</div></div>
+<div class="card"><div class="card-label">Avg Transfer</div><div class="card-value" id="v-transfer">-</div></div>
 </div>
 <div class="chart-card">
 <div class="chart-header">
@@ -964,8 +1008,8 @@ tr:last-child td{border-bottom:none}
 </div>
 <div class="table-card">
 <table>
-<thead><tr><th>Time</th><th>UA</th><th>Range</th><th>Bytes</th><th>Latency</th><th>Status</th></tr></thead>
-<tbody id="log-body"><tr><td colspan="6" class="empty">No data yet</td></tr></tbody>
+<thead><tr><th>Time</th><th>UA</th><th>Range</th><th>Bytes</th><th>TTFB</th><th>Transfer</th><th>Status</th></tr></thead>
+<tbody id="log-body"><tr><td colspan="7" class="empty">No data yet</td></tr></tbody>
 </table>
 </div>
 <div class="footer">Thunder-MT Proxy &middot; auto-refresh every 10s</div>
@@ -1078,13 +1122,13 @@ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
 }
 function renderTable(logs){
 var tbody=document.getElementById('log-body');
-if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="6" class="empty">No data yet</td></tr>';return}
+if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="7" class="empty">No data yet</td></tr>';return}
 var shown=logs.slice(0,10);
 var cls={'200':'status-200','302':'status-302','500':'status-500'};
 tbody.innerHTML=shown.map(function(l){
 var sc=cls[l.status]||'';
 var errBadge=l.error?' <span class="badge badge-err">'+esc(l.error.substring(0,30))+'</span>':'';
-return'<tr><td>'+esc(l.time)+'</td><td>'+esc(l.ua)+'</td><td>'+esc(l.range)+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td class="'+sc+'">'+esc(l.status)+'</td></tr>';
+return'<tr><td>'+esc(l.time)+'</td><td>'+esc(l.ua)+'</td><td>'+esc(l.range)+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td>'+humanizeMs(l.transferTime||l.latency)+'</td><td class="'+sc+'">'+esc(l.status)+'</td></tr>';
 }).join('');
 }
 function refresh(){
@@ -1098,6 +1142,7 @@ document.getElementById('v-bytes').textContent=humanizeBytes(d.totalBytes);
 document.getElementById('v-errors').textContent=d.errors||0;
 document.getElementById('v-active').textContent=d.active||0;
 document.getElementById('v-latency').textContent=humanizeMs(d.avgLatency);
+document.getElementById('v-transfer').textContent=humanizeMs(d.avgTransferTime);
 renderTable(d.logs);
 drawChart();
 updateClock();
@@ -1152,7 +1197,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer atomic.AddInt32(&stats.ActiveStreams, -1)
 
 	start := stats.recordStart()
-	wr := &responseWriter{ResponseWriter: w}
+	wr := &responseWriter{ResponseWriter: w, start: start}
 	ua := r.Header.Get("User-Agent")
 	rangeHeader := r.Header.Get("Range")
 
@@ -1170,7 +1215,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(ua, "Lavf") {
 		log.Printf("Lavf 302 → %s", backendURL)
 		http.Redirect(wr, r, backendURL, http.StatusFound)
-		stats.recordEnd(start, ua, rangeHeader, 0, true, nil)
+		stats.recordEnd(start, wr, ua, rangeHeader, 0, true, nil)
 		return
 	}
 
@@ -1184,7 +1229,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("解析直链失败: %v", err)
 		http.Error(wr, "无法解析后端地址", http.StatusBadGateway)
-		stats.recordEnd(start, ua, rangeHeader, 0, false, err)
+		stats.recordEnd(start, wr, ua, rangeHeader, 0, false, err)
 		return
 	}
 
@@ -1206,7 +1251,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		flushHeaders(wr, fmt.Sprintf("bytes 0-%d/%d", firstEnd, size), firstEnd+1)
 		streamErr = proxy.sortedStream(0, firstEnd, wr)
 		logIfFatal(streamErr, "连续流错误: %v", streamErr)
-		stats.recordEnd(start, ua, rangeHeader, wr.wrote, false, streamErr)
+		stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
 		return
 	}
 
@@ -1244,7 +1289,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamErr = proxy.continuousStream(begin, wr)
 		logIfFatal(streamErr, "连续流错误: %v", streamErr)
 	}
-	stats.recordEnd(start, ua, rangeHeader, wr.wrote, false, streamErr)
+	stats.recordEnd(start, wr, ua, rangeHeader, wr.wrote, false, streamErr)
 }
 
 func main() {
