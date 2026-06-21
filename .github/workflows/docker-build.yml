@@ -59,6 +59,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: |
             type=gha,scope=thunder-mt-${{ github.ref_name }}-${{ matrix.platform_id }}
             type=gha,scope=thunder-mt-${{ matrix.platform_id }}

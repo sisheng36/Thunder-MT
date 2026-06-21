@@ -9,45 +9,115 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
-var version = "1.0.6"
+var version = "1.0.7"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
-var filenameRe = regexp.MustCompile(`filename\*=UTF-8''(.+)`)
+var filenameStarRe = regexp.MustCompile(`filename\*\s*=\s*UTF-8''(.+)`)
+var filenamePlainRe = regexp.MustCompile(`filename\s*=\s*"?([^";]+)"?`)
+
+var allowedHosts map[string]bool
+var dashboardToken string
+
+func initAllowedHosts() {
+	h := strings.TrimSpace(os.Getenv("ALLOW_HOSTS"))
+	if h == "" {
+		return
+	}
+	allowedHosts = make(map[string]bool)
+	for _, host := range strings.Split(h, ",") {
+		host = strings.TrimSpace(strings.ToLower(host))
+		if host != "" {
+			allowedHosts[host] = true
+		}
+	}
+}
+
+func isURLAllowed(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("URL 解析失败: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("协议不允许: %s", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("缺少 host")
+	}
+	if allowedHosts != nil {
+		host := strings.ToLower(u.Hostname())
+		if !allowedHosts[host] {
+			return fmt.Errorf("host 不在白名单: %s", host)
+		}
+	}
+	return nil
+}
+
+func sanitizeFilename(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.ReplaceAll(name, "\"", "")
+	name = strings.ReplaceAll(name, "\\", "")
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || strings.ContainsAny(name, "/\r\n") {
+		return "downloaded_file"
+	}
+	return name
+}
 
 func parseSize(s string) int64 {
 	s = strings.TrimSpace(strings.ToUpper(s))
-	if len(s) < 2 {
-		v, _ := strconv.ParseInt(s, 10, 64)
-		return v
+	if s == "" {
+		return 0
 	}
-	v, _ := strconv.ParseInt(s[:len(s)-1], 10, 64)
-	switch s[len(s)-1] {
+	multiplier := int64(1)
+	last := s[len(s)-1]
+	switch last {
 	case 'K':
-		return v * 1024
+		multiplier = 1024
+		s = s[:len(s)-1]
 	case 'M':
-		return v * 1024 * 1024
+		multiplier = 1024 * 1024
+		s = s[:len(s)-1]
 	case 'G':
-		return v * 1024 * 1024 * 1024
-	default:
-		return v
+		multiplier = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
 	}
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v * multiplier
 }
 
 func extractFileName(rawURL, contentDisposition string) string {
 	if contentDisposition != "" {
-		m := filenameRe.FindStringSubmatch(contentDisposition)
-		if m != nil {
-			decoded, err := url.QueryUnescape(m[1])
-			if err == nil {
-				return decoded
+		if m := filenameStarRe.FindStringSubmatch(contentDisposition); m != nil {
+			if decoded, err := url.QueryUnescape(m[1]); err == nil {
+				return sanitizeFilename(decoded)
 			}
-			return m[1]
+			return sanitizeFilename(m[1])
+		}
+		if m := filenamePlainRe.FindStringSubmatch(contentDisposition); m != nil {
+			if decoded, err := url.QueryUnescape(m[1]); err == nil {
+				return sanitizeFilename(decoded)
+			}
+			return sanitizeFilename(m[1])
 		}
 	}
 	u, err := url.Parse(rawURL)
@@ -58,11 +128,10 @@ func extractFileName(rawURL, contentDisposition string) string {
 	if len(parts) > 0 {
 		name := parts[len(parts)-1]
 		if name != "" {
-			decoded, err := url.QueryUnescape(name)
-			if err == nil {
-				return decoded
+			if decoded, err := url.QueryUnescape(name); err == nil {
+				return sanitizeFilename(decoded)
 			}
-			return name
+			return sanitizeFilename(name)
 		}
 	}
 	return "downloaded_file"
@@ -168,15 +237,19 @@ func (p *urlProxy) downloadChunk(ctx context.Context, begin, end int64) ([]byte,
 		buf := make([]byte, end-begin+1)
 		n, err := io.ReadFull(resp.Body, buf)
 		resp.Body.Close()
-		if err != nil && err != io.ErrUnexpectedEOF {
-			lastErr = err
+		if err != nil || n < len(buf) {
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = fmt.Errorf("短读: 期望 %d 实得 %d", len(buf), n)
+			}
 			if attempt < 1 {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			return nil, err
+			return nil, lastErr
 		}
-		return buf[:n], nil
+		return buf, nil
 	}
 	return nil, lastErr
 }
@@ -293,16 +366,24 @@ type cachedProxy struct {
 	proxy      *urlProxy
 }
 
+type singleflightCall struct {
+	wg  sync.WaitGroup
+	val *urlProxy
+	err error
+}
+
 type proxyCache struct {
-	mu    sync.RWMutex
-	items map[string]*cachedProxy
-	ttl   time.Duration
+	mu       sync.RWMutex
+	items    map[string]*cachedProxy
+	inflight map[string]*singleflightCall
+	ttl      time.Duration
 }
 
 func newProxyCache(ttl time.Duration) *proxyCache {
 	pc := &proxyCache{
-		items: make(map[string]*cachedProxy),
-		ttl:   ttl,
+		items:    make(map[string]*cachedProxy),
+		inflight: make(map[string]*singleflightCall),
+		ttl:      ttl,
 	}
 	go pc.cleanupLoop()
 	return pc
@@ -365,24 +446,41 @@ func (pc *proxyCache) getOrCreate(key string, create func() (*urlProxy, error)) 
 		stats.recordCacheHit()
 		return entry.proxy, nil
 	}
+	if c, ok := pc.inflight[key]; ok {
+		pc.mu.Unlock()
+		c.wg.Wait()
+		if c.err != nil {
+			return nil, c.err
+		}
+		return c.val, nil
+	}
+	c := &singleflightCall{}
+	c.wg.Add(1)
+	pc.inflight[key] = c
 	pc.mu.Unlock()
 
 	proxy, err := create()
+	c.val = proxy
+	c.err = err
+
+	pc.mu.Lock()
+	delete(pc.inflight, key)
+	if err == nil {
+		if existing, ok := pc.items[key]; ok {
+			proxy.client.CloseIdleConnections()
+			existing.lastAccess = time.Now()
+			c.val = existing.proxy
+		} else {
+			pc.items[key] = &cachedProxy{lastAccess: time.Now(), proxy: proxy}
+		}
+	}
+	pc.mu.Unlock()
+
+	c.wg.Done()
 	if err != nil {
 		return nil, err
 	}
-
-	pc.mu.Lock()
-	if entry, ok := pc.items[key]; ok {
-		pc.mu.Unlock()
-		proxy.client.CloseIdleConnections()
-		entry.lastAccess = time.Now()
-		stats.recordCacheHit()
-		return entry.proxy, nil
-	}
-	pc.items[key] = &cachedProxy{lastAccess: time.Now(), proxy: proxy}
-	pc.mu.Unlock()
-	return proxy, nil
+	return c.val, nil
 }
 
 func resolveDirectURL(backendURL string, headers map[string]string) (string, error) {
@@ -409,6 +507,7 @@ func resolveDirectURL(backendURL string, headers map[string]string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("解析直链失败: %w", err)
 	}
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	return resp.Request.URL.String(), nil
@@ -558,7 +657,7 @@ func shortUA(ua string) string {
 func (s *statsCollector) snapshot() map[string]interface{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	total := s.TotalStreams + s.TotalLavf
+	total := s.TotalStreams
 	successRate := 0.0
 	realStreams := s.TotalStreams - s.TotalLavf
 	if realStreams > 0 {
@@ -568,19 +667,26 @@ func (s *statsCollector) snapshot() map[string]interface{} {
 	if total > 0 {
 		avgLatency = s.TotalLatency / total
 	}
+	hourlyCopy := make([]hourlyBucket, 24)
+	copy(hourlyCopy, s.Hourly[:])
+	logsCopy := make([]logEntry, len(s.Logs))
+	copy(logsCopy, s.Logs)
+	dailyCopy := make([]dailyRecord, len(s.Daily))
+	copy(dailyCopy, s.Daily)
 	return map[string]interface{}{
-		"date":        s.Date,
-		"streams":     s.TotalStreams,
-		"lavf":        s.TotalLavf,
-		"successRate": successRate,
-		"totalBytes":  s.TotalBytes,
-		"errors":      s.TotalErrors,
-		"avgLatency":  avgLatency,
-		"cacheHits":   s.CacheHits,
-		"active":      s.ActiveStreams,
-		"hourly":      s.Hourly[:],
-		"daily":       s.Daily,
-		"logs":        s.Logs,
+		"date":         s.Date,
+		"streams":      s.TotalStreams,
+		"lavf":         s.TotalLavf,
+		"successRate":  successRate,
+		"totalBytes":   s.TotalBytes,
+		"totalLatency": s.TotalLatency,
+		"errors":       s.TotalErrors,
+		"avgLatency":   avgLatency,
+		"cacheHits":    s.CacheHits,
+		"active":       s.ActiveStreams,
+		"hourly":       hourlyCopy,
+		"daily":        dailyCopy,
+		"logs":         logsCopy,
 	}
 }
 
@@ -618,6 +724,9 @@ func (s *statsCollector) load(path string) {
 			}
 			if n, ok := snap["cacheHits"].(float64); ok {
 				s.CacheHits = int64(n)
+			}
+			if n, ok := snap["totalLatency"].(float64); ok {
+				s.TotalLatency = int64(n)
 			}
 			if n, ok := snap["successRate"].(float64); ok {
 				s.TotalSuccess = int64(float64(s.TotalStreams) * n / 100)
@@ -731,6 +840,21 @@ func logIfFatal(err error, format string, args ...interface{}) {
 	if isFatal(err) {
 		log.Printf(format, args...)
 	}
+}
+
+func (s *server) checkAuth(r *http.Request) bool {
+	if dashboardToken == "" {
+		return true
+	}
+	if r.URL.Query().Get("token") == dashboardToken {
+		return true
+	}
+	if b := r.Header.Get("Authorization"); strings.HasPrefix(b, "Bearer ") {
+		if strings.TrimPrefix(b, "Bearer ") == dashboardToken {
+			return true
+		}
+	}
+	return false
 }
 
 func newServer(trunk, split string, conns int, headers map[string]string) *server {
@@ -942,6 +1066,10 @@ if(showLabel)ctx.fillText(labels[i],x+barWidth/2,h-padding.bottom+16);
 });
 }
 function updateClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString();document.getElementById('clock').classList.remove('loading');}
+function esc(s){
+if(s===undefined||s===null)return'';
+return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 function renderTable(logs){
 var tbody=document.getElementById('log-body');
 if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="6" class="empty">No data yet</td></tr>';return}
@@ -949,8 +1077,8 @@ var shown=logs.slice(0,10);
 var cls={'200':'status-200','302':'status-302','500':'status-500'};
 tbody.innerHTML=shown.map(function(l){
 var sc=cls[l.status]||'';
-var errBadge=l.error?' <span class="badge badge-err">'+l.error.substring(0,30)+'</span>':'';
-return'<tr><td>'+l.time+'</td><td>'+l.ua+'</td><td>'+l.range+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td class="'+sc+'">'+l.status+'</td></tr>';
+var errBadge=l.error?' <span class="badge badge-err">'+esc(l.error.substring(0,30))+'</span>':'';
+return'<tr><td>'+esc(l.time)+'</td><td>'+esc(l.ua)+'</td><td>'+esc(l.range)+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td class="'+sc+'">'+esc(l.status)+'</td></tr>';
 }).join('');
 }
 function refresh(){
@@ -991,16 +1119,32 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if !s.checkAuth(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(dashboardHTML))
 }
 
 func (s *server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
+	if !s.checkAuth(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats.snapshot())
 }
 
 func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	atomic.AddInt32(&stats.ActiveStreams, 1)
+	defer atomic.AddInt32(&stats.ActiveStreams, -1)
+
 	start := stats.recordStart()
 	wr := &responseWriter{ResponseWriter: w}
 	ua := r.Header.Get("User-Agent")
@@ -1009,7 +1153,11 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	backendURL := r.URL.Query().Get("url")
 	if backendURL == "" {
 		http.Error(wr, "Missing 'url' parameter", http.StatusBadRequest)
-		stats.recordEnd(start, ua, rangeHeader, 0, false, fmt.Errorf("missing url"))
+		return
+	}
+	if err := isURLAllowed(backendURL); err != nil {
+		log.Printf("拒绝 URL: %v", err)
+		http.Error(wr, "URL not allowed", http.StatusForbidden)
 		return
 	}
 
@@ -1036,7 +1184,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	size := proxy.length
 
-	disposition := fmt.Sprintf(`inline; filename="%s"`, proxy.fileName)
+	disposition := fmt.Sprintf(`inline; filename*=UTF-8''%s`, url.PathEscape(proxy.fileName))
 	wr.Header().Set("Content-Type", proxy.contentType)
 	wr.Header().Set("Content-Disposition", disposition)
 	wr.Header().Set("Accept-Ranges", "bytes")
@@ -1059,7 +1207,6 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	m := rangeRe.FindStringSubmatch(rangeHeader)
 	if m == nil {
 		http.Error(wr, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
-		stats.recordEnd(start, ua, rangeHeader, 0, false, fmt.Errorf("invalid range"))
 		return
 	}
 
@@ -1069,7 +1216,6 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if begin >= size {
 		wr.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 		http.Error(wr, "Range Not Satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		stats.recordEnd(start, ua, rangeHeader, 0, false, fmt.Errorf("range out of bounds"))
 		return
 	}
 
@@ -1121,20 +1267,14 @@ func main() {
 	}
 
 	headers := make(map[string]string)
-	if h := os.Getenv("HEADERS"); h != "" {
-		h = strings.TrimSpace(h)
-		if strings.HasPrefix(h, "{") {
-			keyVal := strings.Trim(h, "{}")
-			for _, pair := range strings.Split(keyVal, ",") {
-				parts := strings.SplitN(strings.TrimSpace(pair), ":", 2)
-				if len(parts) == 2 {
-					k := strings.Trim(strings.TrimSpace(parts[0]), `"`)
-					v := strings.Trim(strings.TrimSpace(parts[1]), `"`)
-					headers[k] = v
-				}
-			}
+	if h := strings.TrimSpace(os.Getenv("HEADERS")); h != "" && h != "{}" {
+		if err := json.Unmarshal([]byte(h), &headers); err != nil {
+			log.Printf("HEADERS 解析失败: %v", err)
 		}
 	}
+
+	initAllowedHosts()
+	dashboardToken = strings.TrimSpace(os.Getenv("DASHBOARD_TOKEN"))
 
 	srv := newServer(trunk, split, conns, headers)
 
@@ -1157,8 +1297,33 @@ func main() {
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("Thunder-MT v%s 启动，监听 %s", version, addr)
 	log.Printf("配置: trunk=%s split=%s conns=%d", trunk, split, conns)
+	if allowedHosts != nil {
+		log.Printf("ALLOW_HOSTS 白名单: %d 个 host", len(allowedHosts))
+	}
+	if dashboardToken != "" {
+		log.Printf("仪表盘鉴权: 已启用")
+	}
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+		log.Printf("收到信号，优雅关停...")
+		stats.save("/data/stats.json")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(ctx)
+	}()
+
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("启动失败: %v", err)
 	}
+	log.Printf("已停止")
 }

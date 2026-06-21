@@ -3,8 +3,7 @@ services:
     container_name: thunder-mt
     image: ghcr.io/sisheng36/thunder-mt:latest
     network_mode: host
-    ports:
-      - "8010:8010"
+    # host 网络模式下 ports 无效，服务直接监听宿主机 8010
     environment:
       - TZ=Asia/Shanghai
       - TRUNK=120M       # 单次 Range 返回量 / 缓冲窗口
