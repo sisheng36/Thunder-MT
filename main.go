@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-var version = "1.0.5"
+var version = "1.0.6"
 var rangeRe = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 var filenameRe = regexp.MustCompile(`filename\*=UTF-8''(.+)`)
 
@@ -644,6 +644,59 @@ func (s *statsCollector) load(path string) {
 					dr.Errors = int64(e)
 				}
 				s.Daily = append(s.Daily, dr)
+			}
+		}
+	}
+	if logs, ok := snap["logs"].([]interface{}); ok {
+		for _, l := range logs {
+			if lm, ok := l.(map[string]interface{}); ok {
+				le := logEntry{}
+				if t, ok := lm["time"].(string); ok {
+					le.Time = t
+				}
+				if u, ok := lm["ua"].(string); ok {
+					le.UA = u
+				}
+				if r, ok := lm["range"].(string); ok {
+					le.Range = r
+				}
+				if b, ok := lm["bytes"].(float64); ok {
+					le.Bytes = int64(b)
+				}
+				if lat, ok := lm["latency"].(float64); ok {
+					le.Latency = int64(lat)
+				}
+				if st, ok := lm["status"].(float64); ok {
+					le.Status = int(st)
+				}
+				if ep, ok := lm["error"].(string); ok {
+					le.Error = ep
+				}
+				s.Logs = append(s.Logs, le)
+			}
+		}
+	}
+	if len(s.Logs) > s.LogMax {
+		s.Logs = s.Logs[:s.LogMax]
+	}
+	if hourly, ok := snap["hourly"].([]interface{}); ok {
+		for i, h := range hourly {
+			if i >= 24 {
+				break
+			}
+			if hm, ok := h.(map[string]interface{}); ok {
+				if b, ok := hm["bytes"].(float64); ok {
+					s.Hourly[i].Bytes = int64(b)
+				}
+				if ss, ok := hm["streams"].(float64); ok {
+					s.Hourly[i].Streams = int64(ss)
+				}
+				if l, ok := hm["lavf"].(float64); ok {
+					s.Hourly[i].Lavf = int64(l)
+				}
+				if e, ok := hm["errors"].(float64); ok {
+					s.Hourly[i].Errors = int64(e)
+				}
 			}
 		}
 	}
