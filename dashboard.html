@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thunder-MT Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#0f0f1a 0%,#1a1025 50%,#0f0f1a 100%);color:#e0e0e0;min-height:100vh;padding:20px}
+h1{font-size:24px;font-weight:600;margin-bottom:4px;background:linear-gradient(135deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{color:#6b7280;font-size:13px;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+.card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transition:transform .15s,border-color .15s}
+.card:hover{transform:translateY(-1px);border-color:rgba(255,255,255,0.15)}
+.card-label{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card-value{font-size:26px;font-weight:700;color:#f0f0f0}
+.card-value.green{color:#34d399}
+.card-value.blue{color:#60a5fa}
+.card-value.yellow{color:#fbbf24}
+.card-value.red{color:#f87171}
+.chart-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);margin-bottom:24px}
+.chart-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+.chart-title{font-size:14px;font-weight:600}
+.btn-group{display:flex;gap:4px}
+.btn{padding:5px 12px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.05);color:#9ca3af;border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s}
+.btn:hover{background:rgba(255,255,255,0.10);color:#e0e0e0}
+.btn.active{background:rgba(139,92,246,0.25);border-color:rgba(139,92,246,0.5);color:#a78bfa}
+canvas{width:100%;height:260px}
+.table-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;color:#6b7280;font-weight:500;border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;text-transform:uppercase}
+td{padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.04);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+.status-200{color:#34d399}
+.status-302{color:#fbbf24}
+.status-500{color:#f87171}
+.empty{text-align:center;color:#4b5563;padding:32px;font-style:italic}
+.badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600}
+.badge-ok{background:rgba(52,211,153,0.15);color:#34d399}
+.badge-err{background:rgba(248,113,113,0.15);color:#f87171}
+.footer{text-align:center;color:#374151;font-size:11px;margin-top:24px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.loading{animation:pulse 2s infinite}
+</style>
+</head>
+<body>
+<h1>Thunder-MT</h1>
+<div class="subtitle">Stats Dashboard <span id="clock" class="loading"></span></div>
+<div class="grid">
+<div class="card"><div class="card-label">Streams</div><div class="card-value blue" id="v-streams">-</div></div>
+<div class="card"><div class="card-label">Lavf / ffprobe</div><div class="card-value yellow" id="v-lavf">-</div></div>
+<div class="card"><div class="card-label">Success Rate</div><div class="card-value green" id="v-rate">-</div></div>
+<div class="card"><div class="card-label">Cache Hits</div><div class="card-value blue" id="v-cache">-</div></div>
+<div class="card"><div class="card-label">Traffic</div><div class="card-value" id="v-bytes">-</div></div>
+<div class="card"><div class="card-label">Errors</div><div class="card-value red" id="v-errors">-</div></div>
+<div class="card"><div class="card-label">Active</div><div class="card-value green" id="v-active">-</div></div>
+<div class="card"><div class="card-label">Avg Latency</div><div class="card-value" id="v-latency">-</div></div>
+<div class="card"><div class="card-label">Avg Transfer</div><div class="card-value" id="v-transfer">-</div></div>
+</div>
+<div class="chart-card">
+<div class="chart-header">
+<span class="chart-title">Traffic (Bytes)</span>
+<div class="btn-group">
+<button class="btn active" data-range="1h">1H</button>
+<button class="btn" data-range="6h">6H</button>
+<button class="btn" data-range="24h">24H</button>
+<button class="btn" data-range="7d">7D</button>
+<button class="btn" data-range="15d">15D</button>
+<button class="btn" data-range="30d">30D</button>
+</div>
+</div>
+<canvas id="chart"></canvas>
+</div>
+<div class="table-card">
+<table>
+<thead><tr><th>Time</th><th>UA</th><th>Range</th><th>Bytes</th><th>TTFB</th><th>Transfer</th><th>Status</th></tr></thead>
+<tbody id="log-body"><tr><td colspan="7" class="empty">No data yet</td></tr></tbody>
+</table>
+</div>
+<div class="footer">Thunder-MT Proxy &middot; auto-refresh every 10s</div>
+<script>
+function humanizeBytes(b){
+if(b===undefined||b===null)return'0 B';
+if(b<1024)return b+' B';
+var kb=b/1024;
+if(kb<1024)return kb.toFixed(1)+' KB';
+var mb=kb/1024;
+if(mb<1024)return mb.toFixed(1)+' MB';
+var gb=mb/1024;
+return gb.toFixed(2)+' GB';
+}
+function humanizeMs(ms){
+if(ms===undefined||ms===null)return'0ms';
+if(ms<1000)return ms+'ms';
+return(ms/1000).toFixed(1)+'s';
+}
+function fmtPct(v){
+if(v===undefined||v===null)return'-';
+return v.toFixed(1)+'%';
+}
+var chartRange='1h';
+var chartData=null;
+var canvas=document.getElementById('chart');
+var ctx=canvas.getContext('2d');
+function drawChart(){
+if(!canvas||!ctx)return;
+var dpr=window.devicePixelRatio||1;
+var rect=canvas.getBoundingClientRect();
+canvas.width=rect.width*dpr;
+canvas.height=rect.height*dpr;
+ctx.setTransform(dpr,0,0,dpr,0,0);
+var w=rect.width;
+var h=rect.height;
+ctx.clearRect(0,0,w,h);
+var datasets=[];
+var labels=[];
+if(chartRange==='1h'||chartRange==='6h'||chartRange==='24h'){
+var hours=chartRange==='1h'?1:chartRange==='6h'?6:24;
+var now=new Date().getHours();
+for(var i=hours-1;i>=0;i--){
+var hr=(now-i+24)%24;
+labels.push(hr+':00');
+}
+if(chartData&&chartData.hourly){
+for(var j=0;j<hours;j++){
+var idx=(now-j+24)%24;
+var bk=chartData.hourly[idx]||{b:0};
+datasets.push(bk.b);
+}
+datasets.reverse();
+}
+}else{
+var days=chartRange==='7d'?7:chartRange==='15d'?15:30;
+if(chartData&&chartData.daily){
+var dl=chartData.daily.slice(0,days).reverse();
+for(var k=0;k<dl.length;k++){
+labels.push(dl[k].date.slice(5));
+datasets.push(dl[k].bytes||0);
+}
+}else{
+for(var d=0;d<Math.min(days,30);d++){labels.push('--');datasets.push(0);}
+}
+}
+if(datasets.length===0){ctx.fillStyle='#4b5563';ctx.font='14px sans-serif';ctx.textAlign='center';ctx.fillText('No data',w/2,h/2);return}
+var maxVal=Math.max.apply(null,datasets);
+if(maxVal===0)maxVal=1;
+var padding={top:10,right:16,bottom:32,left:58};
+var pw=w-padding.left-padding.right;
+var ph=h-padding.top-padding.bottom;
+ctx.strokeStyle='rgba(255,255,255,0.06)';
+ctx.lineWidth=1;
+for(var i=0;i<=4;i++){
+var y=padding.top+(ph/4)*i;
+ctx.beginPath();
+ctx.moveTo(padding.left,y);
+ctx.lineTo(w-padding.right,y);
+ctx.stroke();
+var lbl=i===0?humanizeBytes(maxVal):humanizeBytes(maxVal*(1-i/4));
+ctx.fillStyle='#4b5563';
+ctx.font='10px sans-serif';
+ctx.textAlign='right';
+ctx.fillText(lbl,padding.left-6,y+4);
+}
+var gradient=ctx.createLinearGradient(0,padding.top,0,h-padding.bottom);
+gradient.addColorStop(0,'rgba(139,92,246,0.25)');
+gradient.addColorStop(1,'rgba(96,165,250,0.05)');
+ctx.beginPath();
+var barWidth=pw/datasets.length*.6;
+var gap=pw/datasets.length*.4;
+datasets.forEach(function(v,i){
+var barH=(v/maxVal)*ph;
+var x=padding.left+i*(barWidth+gap)+gap/2;
+var y=h-padding.bottom-barH;
+ctx.fillStyle=gradient;
+ctx.fillRect(x,y,barWidth,barH);
+ctx.fillStyle='#6b7280';
+ctx.font='10px sans-serif';
+ctx.textAlign='center';
+var showLabel=(chartRange==='24h'&&labels.length>12)?(i%4===0):(chartRange==='7d'||chartRange==='15d'||chartRange==='30d')?(i%Math.ceil(labels.length/8)===0):true;
+if(showLabel)ctx.fillText(labels[i],x+barWidth/2,h-padding.bottom+16);
+});
+}
+function updateClock(){document.getElementById('clock').textContent=new Date().toLocaleTimeString();document.getElementById('clock').classList.remove('loading');}
+function esc(s){
+if(s===undefined||s===null)return'';
+return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function renderTable(logs){
+var tbody=document.getElementById('log-body');
+if(!logs||logs.length===0){tbody.innerHTML='<tr><td colspan="7" class="empty">No data yet</td></tr>';return}
+var shown=logs.slice(0,10);
+var cls={'200':'status-200','302':'status-302','500':'status-500'};
+tbody.innerHTML=shown.map(function(l){
+var sc=cls[l.status]||'';
+var errBadge=l.error?' <span class="badge badge-err">'+esc(l.error.substring(0,30))+'</span>':'';
+return'<tr><td>'+esc(l.time)+'</td><td>'+esc(l.ua)+'</td><td>'+esc(l.range)+'</td><td>'+humanizeBytes(l.bytes)+'</td><td>'+humanizeMs(l.latency)+'</td><td>'+humanizeMs(l.transferTime||l.latency)+'</td><td class="'+sc+'">'+esc(l.status)+'</td></tr>';
+}).join('');
+}
+function refresh(){
+fetch('/api/stats').then(function(r){return r.json();}).then(function(d){
+chartData=d;
+document.getElementById('v-streams').textContent=d.streams||0;
+document.getElementById('v-lavf').textContent=d.lavf||0;
+document.getElementById('v-rate').textContent=fmtPct(d.successRate);
+document.getElementById('v-cache').textContent=d.cacheHits||0;
+document.getElementById('v-bytes').textContent=humanizeBytes(d.totalBytes);
+document.getElementById('v-errors').textContent=d.errors||0;
+document.getElementById('v-active').textContent=d.active||0;
+document.getElementById('v-latency').textContent=humanizeMs(d.avgLatency);
+document.getElementById('v-transfer').textContent=humanizeMs(d.avgTransferTime);
+renderTable(d.logs);
+drawChart();
+updateClock();
+}).catch(function(){});
+}
+document.querySelectorAll('.btn').forEach(function(b){
+b.addEventListener('click',function(){
+document.querySelectorAll('.btn').forEach(function(x){x.classList.remove('active');});
+b.classList.add('active');
+chartRange=b.dataset.range;
+drawChart();
+});
+});
+refresh();
+setInterval(refresh,10000);
+window.addEventListener('resize',drawChart);
+</script>
+</body>
+</html>

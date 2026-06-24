@@ -1,7 +1,7 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY go.mod ./
-COPY main.go ./
+COPY *.go dashboard.html ./
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o /thunder-mt .
 
