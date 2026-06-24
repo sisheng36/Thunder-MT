@@ -42,7 +42,7 @@ const (
 	shutdownTimeout = 30 * time.Second
 )
 
-var version = "1.1.0"
+var version = "2.0.0"
 
 var dashboardToken string
 
