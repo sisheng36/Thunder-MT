@@ -194,6 +194,7 @@ sequenceDiagram
 | `TRUNK` | 单次 Range 返回量/缓冲窗口 | 10M |
 | `SPLIT` | 并行下载分块大小 | 1M |
 | `FIRST_CHUNK` | 无 Range 请求首块大小(起播) | 2M |
+| `FIRST_TRUNK` | 连续流首窗口大小(起播/seek,不超过 TRUNK) | 40M |
 | `CONNS` | 并行 goroutine 数 | 60 |
 | `HOST` | 监听地址 | 0.0.0.0 |
 | `PORT` | 监听端口 | 8010 |

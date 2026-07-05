@@ -22,6 +22,7 @@ type server struct {
 	trunk      int64
 	split      int64
 	firstChunk int64
+	firstTrunk int64
 	conns      int
 	headers    map[string]string
 	cache      *proxyCache
@@ -66,11 +67,13 @@ func (s *server) checkAuth(r *http.Request) bool {
 	return false
 }
 
-func newServer(trunk, split, firstChunk string, conns int, headers map[string]string) *server {
+func newServer(trunk, split, firstChunk, firstTrunk string, conns int, headers map[string]string) *server {
+	t := normalizeTrunk(parseSize(trunk))
 	return &server{
-		trunk:      normalizeTrunk(parseSize(trunk)),
+		trunk:      t,
 		split:      normalizeSplit(parseSize(split)),
 		firstChunk: normalizeFirstChunk(parseSize(firstChunk)),
+		firstTrunk: normalizeFirstTrunk(parseSize(firstTrunk), t),
 		conns:      normalizeConns(conns),
 		headers:    headers,
 		cache:      newProxyCache(cacheTTL),
@@ -162,7 +165,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return newURLProxy(directURL, s.trunk, s.split, s.conns, s.headers)
+		return newURLProxy(directURL, s.trunk, s.firstTrunk, s.split, s.conns, s.headers)
 	})
 	if err != nil {
 		log.Printf("解析直链失败: %v", err)

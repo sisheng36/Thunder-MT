@@ -127,6 +127,18 @@ func normalizeFirstChunk(v int64) int64 {
 	return v
 }
 
+// normalizeFirstTrunk 保证连续流首窗口 ≥1MB 且不超过 trunk
+// 首窗口过大(>trunk)会拖慢起播,需 cap 到 trunk;过小(<1MB)易触发死循环,兜底到默认 40M
+func normalizeFirstTrunk(v, trunk int64) int64 {
+	if v < 1024*1024 {
+		return defaultFirstTrunk
+	}
+	if v > trunk {
+		return trunk
+	}
+	return v
+}
+
 // normalizeConns 保证 conns ≥1, 防无缓冲 channel 死锁 (#1#2)
 // conns=0 会让 sem := make(chan struct{}, 0) 变成无缓冲, 所有下载 goroutine 永久阻塞
 func normalizeConns(v int) int {

@@ -17,13 +17,14 @@ type urlProxy struct {
 	fileName    string
 	length      int64
 	trunk       int64
+	firstTrunk  int64
 	split       int64
 	conns       int
 	client      *http.Client
 	headers     map[string]string
 }
 
-func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[string]string) (*urlProxy, error) {
+func newURLProxy(targetURL string, trunk, firstTrunk, split int64, conns int, headers map[string]string) (*urlProxy, error) {
 	client := &http.Client{Timeout: probeClientTimeout}
 
 	req, err := http.NewRequest("GET", targetURL, nil)
@@ -70,6 +71,7 @@ func newURLProxy(targetURL string, trunk, split int64, conns int, headers map[st
 		fileName:    fileName,
 		length:      length,
 		trunk:       trunk,
+		firstTrunk:  firstTrunk,
 		split:       split,
 		conns:       conns,
 		client:      client,
@@ -216,8 +218,15 @@ func (p *urlProxy) sortedStream(begin, end int64, w io.Writer) error {
 
 func (p *urlProxy) continuousStream(begin int64, w io.Writer) error {
 	nextBegin := begin
+	first := true
 	for nextBegin < p.length {
-		end := nextBegin + p.trunk - 1
+		// 首窗口用 firstTrunk(更小,加快起播/seek响应);后续 window 用 trunk(更大,吞吐优先)
+		window := p.trunk
+		if first {
+			window = p.firstTrunk
+			first = false
+		}
+		end := nextBegin + window - 1
 		if end >= p.length {
 			end = p.length - 1
 		}

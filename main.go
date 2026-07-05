@@ -20,6 +20,7 @@ const (
 	defaultTrunk      int64 = 10 * 1024 * 1024 // 10M
 	defaultSplit      int64 = 1024 * 1024      // 1M
 	defaultFirstChunk int64 = 2 * 1024 * 1024  // 2M
+	defaultFirstTrunk int64 = 40 * 1024 * 1024 // 40M
 	defaultConns      int   = 60
 
 	// 缓存与统计
@@ -61,6 +62,10 @@ func main() {
 	if firstChunk == "" {
 		firstChunk = "2M"
 	}
+	firstTrunk := os.Getenv("FIRST_TRUNK")
+	if firstTrunk == "" {
+		firstTrunk = "40M"
+	}
 	connsStr := os.Getenv("CONNS")
 	conns, _ := strconv.Atoi(connsStr) // normalizeConns 会兜底, 这里忽略 err 安全
 	host := os.Getenv("HOST")
@@ -82,7 +87,7 @@ func main() {
 	initAllowedHosts()
 	dashboardToken = strings.TrimSpace(os.Getenv("DASHBOARD_TOKEN"))
 
-	srv := newServer(trunk, split, firstChunk, conns, headers)
+	srv := newServer(trunk, split, firstChunk, firstTrunk, conns, headers)
 
 	os.MkdirAll(statsDir, 0755)
 	stats.load(statsFile)
@@ -102,7 +107,7 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%s", host, port)
 	log.Printf("Thunder-MT v%s 启动，监听 %s", version, addr)
-	log.Printf("配置: trunk=%s split=%s firstChunk=%s conns=%d", trunk, split, firstChunk, conns)
+	log.Printf("配置: trunk=%s split=%s firstChunk=%s firstTrunk=%s conns=%d", trunk, split, firstChunk, firstTrunk, conns)
 	if allowedHosts != nil {
 		log.Printf("ALLOW_HOSTS 白名单: %d 个 host", len(allowedHosts))
 	}

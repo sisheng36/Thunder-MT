@@ -65,18 +65,40 @@ func TestNewServerFirstChunk(t *testing.T) {
 		{"3M", 3 * 1024 * 1024},
 	}
 	for _, c := range cases {
-		s := newServer("10M", "1M", c.in, 3, nil)
+		s := newServer("10M", "1M", c.in, "40M", 3, nil)
 		if s.firstChunk != c.want {
 			t.Errorf("newServer firstChunk=%q -> %d, want %d", c.in, s.firstChunk, c.want)
 		}
 	}
 	// trunk/split 不受影响
-	s := newServer("120M", "3M", "2M", 3, nil)
+	s := newServer("120M", "3M", "2M", "40M", 3, nil)
 	if s.trunk != 120*1024*1024 {
 		t.Errorf("trunk 应为 120M, 实得 %d", s.trunk)
 	}
 	if s.split != 3*1024*1024 {
 		t.Errorf("split 应为 3M, 实得 %d", s.split)
+	}
+}
+
+func TestNewServerFirstTrunk(t *testing.T) {
+	cases := []struct {
+		name      string
+		trunk     string
+		firstTrunk string
+		want      int64
+	}{
+		{"默认 40M", "120M", "", 40 * 1024 * 1024},
+		{"自定义 30M", "120M", "30M", 30 * 1024 * 1024},
+		{"v > trunk 时 cap 到 trunk", "120M", "200M", 120 * 1024 * 1024},
+		{"v = trunk 时等于 trunk", "120M", "120M", 120 * 1024 * 1024},
+		{"v < 1M 兜底默认", "120M", "100K", 40 * 1024 * 1024},
+		{"v 非法兜底默认", "120M", "abc", 40 * 1024 * 1024},
+	}
+	for _, c := range cases {
+		s := newServer(c.trunk, "1M", "2M", c.firstTrunk, 3, nil)
+		if s.firstTrunk != c.want {
+			t.Errorf("%s: firstTrunk=%q (trunk=%q) -> %d, want %d", c.name, c.firstTrunk, c.trunk, s.firstTrunk, c.want)
+		}
 	}
 }
 
